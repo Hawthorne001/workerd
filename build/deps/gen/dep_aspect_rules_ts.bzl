@@ -2,10 +2,10 @@
 
 load("@//:build/http.bzl", "http_archive")
 
-TAG_NAME = "v3.2.1"
-URL = "https://github.com/aspect-build/rules_ts/releases/download/v3.2.1/rules_ts-v3.2.1.tar.gz"
-STRIP_PREFIX = "rules_ts-3.2.1"
-SHA256 = "8bbac753f4b61adbfc1d9878b87b9cd0f64c9e8e6d8fafc8a1bbfa9625bab162"
+TAG_NAME = "v3.3.2"
+URL = "https://github.com/aspect-build/rules_ts/releases/download/v3.3.2/rules_ts-v3.3.2.tar.gz"
+STRIP_PREFIX = "rules_ts-3.3.2"
+SHA256 = "cff3137b043ff6bf1a2542fd9691dc762432370cd39eb4bb0756d288de52067d"
 TYPE = "tgz"
 
 def dep_aspect_rules_ts():

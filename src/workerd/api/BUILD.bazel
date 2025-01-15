@@ -8,12 +8,16 @@ filegroup(
     srcs = glob(
         ["**/*.c++"],
         exclude = [
+            # TODO(cleanup): Continue shrinking the io target: Create independent targets for
+            # analytics-engine, kv, urlpattern and streams/compression, which either do not depend
+            # on io or do not have io depending on them.
             "**/*test*.c++",
             "data-url.c++",
             "encoding.c++",
             "html-rewriter.c++",
             "hyperdrive.c++",
             "pyodide/pyodide.c++",
+            "pyodide/setup-emscripten.c++",
             "memory-cache.c++",
             "r2*.c++",
             "rtti.c++",
@@ -37,6 +41,7 @@ filegroup(
             "hyperdrive.h",
             "memory-cache.h",
             "pyodide/pyodide.h",
+            "pyodide/setup-emscripten.h",
             "modules.h",
             "r2*.h",
             "rtti.h",
@@ -126,15 +131,15 @@ wd_cc_library(
     name = "pyodide",
     srcs = [
         "pyodide/pyodide.c++",
+        "pyodide/setup-emscripten.c++",
     ],
     hdrs = [
         "pyodide/pyodide.h",
-        "//src/pyodide:generated/pyodide_extra.capnp.h",
+        "pyodide/setup-emscripten.h",
     ],
     implementation_deps = ["//src/workerd/util:string-buffer"],
     visibility = ["//visibility:public"],
     deps = [
-        "//src/pyodide",
         "//src/pyodide:pyodide_extra_capnp",
         "//src/workerd/io",
         "//src/workerd/jsg",
@@ -323,6 +328,12 @@ wd_test(
 )
 
 wd_test(
+    src = "r2-test.wd-test",
+    args = ["--experimental"],
+    data = ["r2-test.js"],
+)
+
+wd_test(
     src = "rtti-test.wd-test",
     args = ["--experimental"],
     data = ["rtti-test.js"],
@@ -466,6 +477,8 @@ wd_test(
     src = "tests/htmlrewriter-test.wd-test",
     args = ["--experimental"],
     data = ["tests/htmlrewriter-test.js"],
+    # TODO(soon): Test is excessively flaky under ASan, re-enable once fixed
+    tags = ["no-asan"],
 )
 
 wd_test(

@@ -14,6 +14,7 @@
 #include "form-data.h"
 #include "web-socket.h"
 #include <workerd/api/url.h>
+#include <workerd/api/url-standard.h>
 #include "blob.h"
 #include <workerd/io/compatibility-date.capnp.h>
 #include "worker-rpc.h"
@@ -252,7 +253,8 @@ public:
   // from any of the other source types, Body can create a new ReadableStream from the source, and
   // the POST will successfully retransmit.
   using Initializer = kj::OneOf<jsg::Ref<ReadableStream>, kj::String, kj::Array<byte>,
-                                jsg::Ref<Blob>, jsg::Ref<URLSearchParams>, jsg::Ref<FormData>>;
+                                jsg::Ref<Blob>, jsg::Ref<FormData>,
+                                jsg::Ref<URLSearchParams>, jsg::Ref<url::URLSearchParams>>;
 
   struct RefcountedBytes final: public kj::Refcounted {
     kj::Array<kj::byte> bytes;
@@ -384,6 +386,7 @@ public:
     JSG_TS_OVERRIDE({
       json<T>(): Promise<T>;
       bytes(): Promise<Uint8Array>;
+      arrayBuffer(): Promise<ArrayBuffer>;
     });
     // Allow JSON body type to be specified
   }
@@ -598,7 +601,7 @@ public:
           ? Rpc.Provider<T, Reserved | "fetch" | "connect" | "queue" | "scheduled">
           : unknown
       ) & {
-        fetch(input: RequestInfo, init?: RequestInit): Promise<Response>;
+        fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
         connect(address: SocketAddress | string, options?: SocketOptions): Socket;
         queue(queueName: string, messages: ServiceBindingQueueMessage[]): Promise<FetcherQueueResult>;
         scheduled(options?: FetcherScheduledOptions): Promise<FetcherScheduledResult>;
@@ -612,7 +615,7 @@ public:
           ? Rpc.Provider<T, Reserved | "fetch" | "connect">
           : unknown
       ) & {
-        fetch(input: RequestInfo, init?: RequestInit): Promise<Response>;
+        fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
         connect(address: SocketAddress | string, options?: SocketOptions): Socket;
       });
     }
@@ -752,12 +755,21 @@ struct RequestInitializerDict {
              referrer, referrerPolicy, integrity, signal);
   JSG_STRUCT_TS_OVERRIDE_DYNAMIC(CompatibilityFlags::Reader flags) {
     if(flags.getCacheOptionEnabled()) {
-      JSG_TS_OVERRIDE(RequestInit<Cf = CfProperties> {
-        headers?: HeadersInit;
-        body?: BodyInit | null;
-        cache?: 'no-store';
-        cf?: Cf;
-      });
+      if(flags.getCacheNoCache()) {
+        JSG_TS_OVERRIDE(RequestInit<Cf = CfProperties> {
+          headers?: HeadersInit;
+          body?: BodyInit | null;
+          cache?: 'no-store' | 'no-cache';
+          cf?: Cf;
+        });
+      } else {
+        JSG_TS_OVERRIDE(RequestInit<Cf = CfProperties> {
+          headers?: HeadersInit;
+          body?: BodyInit | null;
+          cache?: 'no-store';
+          cf?: Cf;
+        });
+      }
     } else {
       JSG_TS_OVERRIDE(RequestInit<Cf = CfProperties> {
         headers?: HeadersInit;
@@ -904,7 +916,7 @@ public:
 
     JSG_METHOD(clone);
 
-    JSG_TS_DEFINE(type RequestInfo<CfHostMetadata = unknown, Cf = CfProperties<CfHostMetadata>> = Request<CfHostMetadata, Cf> | string | URL);
+    JSG_TS_DEFINE(type RequestInfo<CfHostMetadata = unknown, Cf = CfProperties<CfHostMetadata>> = Request<CfHostMetadata, Cf> | string);
     // All type aliases get inlined when exporting RTTI, but this type alias is included by
     // the official TypeScript types, so users might be depending on it.
 
@@ -926,15 +938,24 @@ public:
       JSG_READONLY_PROTOTYPE_PROPERTY(keepalive, getKeepalive);
       if(flags.getCacheOptionEnabled()) {
         JSG_READONLY_PROTOTYPE_PROPERTY(cache, getCache);
-        JSG_TS_OVERRIDE(<CfHostMetadata = unknown, Cf = CfProperties<CfHostMetadata>> {
-          constructor(input: RequestInfo<CfProperties>, init?: RequestInit<Cf>);
-          clone(): Request<CfHostMetadata, Cf>;
-          cache?: "no-store";
-          get cf(): Cf | undefined;
-        });
+        if(flags.getCacheNoCache()) {
+          JSG_TS_OVERRIDE(<CfHostMetadata = unknown, Cf = CfProperties<CfHostMetadata>> {
+            constructor(input: RequestInfo<CfProperties> | URL, init?: RequestInit<Cf>);
+            clone(): Request<CfHostMetadata, Cf>;
+            cache?: "no-store" | "no-cache";
+            get cf(): Cf | undefined;
+          });
+        } else {
+          JSG_TS_OVERRIDE(<CfHostMetadata = unknown, Cf = CfProperties<CfHostMetadata>> {
+            constructor(input: RequestInfo<CfProperties> | URL, init?: RequestInit<Cf>);
+            clone(): Request<CfHostMetadata, Cf>;
+            cache?: "no-store";
+            get cf(): Cf | undefined;
+          });
+        }
       } else {
         JSG_TS_OVERRIDE(<CfHostMetadata = unknown, Cf = CfProperties<CfHostMetadata>> {
-          constructor(input: RequestInfo<CfProperties>, init?: RequestInit<Cf>);
+          constructor(input: RequestInfo<CfProperties> | URL, init?: RequestInit<Cf>);
           clone(): Request<CfHostMetadata, Cf>;
           get cf(): Cf | undefined;
         });
@@ -961,7 +982,7 @@ public:
       JSG_READONLY_INSTANCE_PROPERTY(keepalive, getKeepalive);
 
       JSG_TS_OVERRIDE(<CfHostMetadata = unknown, Cf = CfProperties<CfHostMetadata>> {
-        constructor(input: RequestInfo<CfProperties>, init?: RequestInit<Cf>);
+        constructor(input: RequestInfo<CfProperties> | URL, init?: RequestInit<Cf>);
         clone(): Request<CfHostMetadata, Cf>;
         readonly cf?: Cf;
       });

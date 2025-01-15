@@ -27,7 +27,7 @@ class Evaluator {
   // TODO(cleanup): `ConfigurationType` currently can optionally be specified to fix the build
   //   in cases that the isolate includes types that require configuration, but currently the
   //   type is always default-constructed. What if you want to specify a test config?
-public:
+ public:
   explicit Evaluator(V8System& v8System): v8System(v8System) {}
 
   IsolateType& getIsolate() {
@@ -135,7 +135,29 @@ public:
     lock.runMicrotasks();
   }
 
-private:
+  // Run some C++ code in a new lock and context.
+  template <typename Func>
+  void run(Func&& func) {
+    getIsolate().runInLockScope([&](typename IsolateType::Lock& lock) {
+      JSG_WITHIN_CONTEXT_SCOPE(lock,
+          lock.template newContext<ContextType>().getHandle(lock.v8Isolate), [&](jsg::Lock& js) {
+        v8::TryCatch tryCatch(js.v8Isolate);
+
+        try {
+          func(js);
+        } catch (JsExceptionThrown&) {
+          if (tryCatch.HasTerminated()) {
+            KJ_FAIL_ASSERT("TerminateExecution() was called");
+          } else {
+            KJ_ASSERT(tryCatch.HasCaught());
+            jsg::throwTunneledException(js.v8Isolate, tryCatch.Exception());
+          }
+        }
+      });
+    });
+  }
+
+ private:
   V8System& v8System;
 };
 
@@ -213,7 +235,7 @@ struct NumberBox: public Object {
 };
 
 class BoxBox: public Object {
-public:
+ public:
   explicit BoxBox(Ref<NumberBox> inner): inner(kj::mv(inner)) {}
 
   Ref<NumberBox> inner;
@@ -230,7 +252,7 @@ public:
     JSG_READONLY_INSTANCE_PROPERTY(inner, getInner);
   }
 
-private:
+ private:
   void visitForGc(GcVisitor& visitor) {
     visitor.visit(inner);
   }

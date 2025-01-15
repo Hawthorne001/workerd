@@ -8,6 +8,7 @@ import {
   LOAD_WHEELS_FROM_ARTIFACT_BUNDLER,
 } from 'pyodide-internal:metadata';
 import { simpleRunPython } from 'pyodide-internal:util';
+import { default as EmbeddedPackagesTarReader } from 'pyodide-internal:packages_tar_reader';
 
 const canonicalizeNameRegex = /[-_.]+/g;
 
@@ -22,9 +23,13 @@ function canonicalizePackageName(name: string): string {
 }
 
 // The "name" field in the lockfile is not canonicalized
-const STDLIB_PACKAGES: string[] = Object.values(LOCKFILE.packages)
+export const STDLIB_PACKAGES: string[] = Object.values(LOCKFILE.packages)
   .filter(({ install_dir }) => install_dir === 'stdlib')
   .map(({ name }) => canonicalizePackageName(name));
+
+// Each item in the list is an element of the file path, for example
+// `folder/file.txt` -> `["folder", "file.txt"]
+export type FilePath = string[];
 
 /**
  * SitePackagesDir keeps track of the virtualized view of the site-packages
@@ -32,7 +37,7 @@ const STDLIB_PACKAGES: string[] = Object.values(LOCKFILE.packages)
  */
 class SitePackagesDir {
   public rootInfo: TarFSInfo;
-  public soFiles: string[][];
+  public soFiles: FilePath[];
   public loadedRequirements: Set<string>;
   constructor() {
     this.rootInfo = {
@@ -44,6 +49,7 @@ class SitePackagesDir {
       path: '',
       name: '',
       parts: [],
+      reader: null,
     };
     this.soFiles = [];
     this.loadedRequirements = new Set();
@@ -125,9 +131,17 @@ class SitePackagesDir {
  *
  * This also returns the list of soFiles in the resulting site-packages
  * directory so we can preload them.
+ *
+ * TODO(later): This needs to be removed when external package loading is enabled.
  */
 export function buildSitePackages(requirements: Set<string>): SitePackagesDir {
-  const [bigTarInfo, bigTarSoFiles] = parseTarInfo();
+  if (EmbeddedPackagesTarReader.read === undefined) {
+    // Package retrieval is enabled, so the embedded tar reader isn't initialised.
+    // All packages, including STDLIB_PACKAGES, are loaded in `loadPackages`.
+    return new SitePackagesDir();
+  }
+
+  const [bigTarInfo, bigTarSoFiles] = parseTarInfo(EmbeddedPackagesTarReader);
 
   let requirementsInBigBundle = new Set([...STDLIB_PACKAGES]);
 
@@ -171,6 +185,7 @@ function disabledLoadPackage(): never {
 function getTransitiveRequirements(): Set<string> {
   const requirements = REQUIREMENTS.map(canonicalizePackageName);
   // resolve transitive dependencies of requirements and if IN_WORKERD install them from the cdn.
+  // TODO(later): use current package's LOCKFILE instead of the global.
   const packageDatas = recursiveDependencies(LOCKFILE, requirements);
   return new Set(packageDatas.map(({ name }) => canonicalizePackageName(name)));
 }

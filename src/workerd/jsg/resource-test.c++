@@ -5,7 +5,6 @@
 #include "jsg-test.h"
 
 #include <workerd/jsg/resource-test.capnp.h>
-#include <workerd/util/autogate.h>
 
 namespace workerd::jsg::test {
 namespace {
@@ -149,7 +148,7 @@ struct PropContext: public ContextGlobalObject {
     JSG_NESTED_TYPE(PrototypePropertyObject);
   }
 
-private:
+ private:
   kj::String contextProperty;
 };
 JSG_DECLARE_ISOLATE_TYPE(PropIsolate, PropContext, PrototypePropertyObject);
@@ -237,13 +236,13 @@ KJ_TEST("non-constructible types can't be constructed") {
 
 struct IterableContext: public ContextGlobalObject {
   class Iterable: public Object {
-  public:
+   public:
     static Ref<Iterable> constructor() {
       return jsg::alloc<Iterable>();
     }
 
     class Iterator: public Object {
-    public:
+     public:
       struct NextValue {
         bool done;
         Optional<int> value;
@@ -273,7 +272,7 @@ struct IterableContext: public ContextGlobalObject {
         JSG_ITERABLE(self);
       }
 
-    private:
+     private:
       Ref<Iterable> parent;
       int* cursor;
     };
@@ -287,7 +286,7 @@ struct IterableContext: public ContextGlobalObject {
       JSG_ITERABLE(entries);
     }
 
-  private:
+   private:
     int values[10] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
     // In real code, this data structure could be more complex, and we would need to think about
     // iterator invalidation, which might require storing back-references from the parent iterable
@@ -591,7 +590,6 @@ struct JsBundleContext: public ContextGlobalObject {
 JSG_DECLARE_ISOLATE_TYPE(JsBundleIsolate, JsBundleContext);
 
 KJ_TEST("expectEvalModule function works") {
-  util::Autogate::initAutogate({});
   Evaluator<JsBundleContext, JsBundleIsolate, decltype(nullptr), JsBundleIsolate_TypeWrapper> e(
       v8System);
   e.expectEvalModule("export function run() { return 123; }", "number", "123");

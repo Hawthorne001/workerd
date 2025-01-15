@@ -5,7 +5,10 @@ const tailWorkerExample :Workerd.Config = (
     (name = "main", worker = .helloWorld),
     (name = "log", worker = .logWorker),
   ],
-  sockets = [ ( name = "http", address = "*:8080", http = (), service = "main" ) ]
+  sockets = [ ( name = "http", address = "*:8080", http = (), service = "main" ) ],
+  autogates = [
+    "workerd-autogate-streaming-tail-workers",
+  ],
 );
 
 const helloWorld :Workerd.Worker = (
@@ -13,7 +16,7 @@ const helloWorld :Workerd.Worker = (
     (name = "worker", esModule = embed "worker.js")
   ],
   compatibilityDate = "2024-10-14",
-  logging = ( toService = "log" ),
+  tails = ["log"],
 );
 
 const logWorker :Workerd.Worker = (

@@ -587,6 +587,77 @@ export class ERR_INVALID_URI extends NodeError {
   }
 }
 
+// Example:
+//
+// Error: queryTxt ENOTFOUND google.com2
+//     at QueryReqWrap.onresolve [as oncomplete] (node:internal/dns/callback_resolver:45:19)
+//     at QueryReqWrap.callbackTrampoline (node:internal/async_hooks:130:17) {
+//   errno: undefined,
+//   code: 'ENOTFOUND',
+//   syscall: 'queryTxt',
+//   hostname: 'google.com2'
+// }
+export class DnsError extends NodeError {
+  errno = undefined;
+
+  constructor(
+    public hostname: string,
+    code: string,
+    public syscall: string
+  ) {
+    super(code, `${syscall} ${code} ${hostname}`);
+  }
+}
+
+export class ERR_OPTION_NOT_IMPLEMENTED extends NodeError {
+  constructor(name: string | symbol) {
+    if (typeof name === 'symbol') {
+      name = (name as symbol).description!;
+    }
+    super(
+      'ERR_OPTION_NOT_IMPLEMENTED',
+      `The ${name} option is not implemented`
+    );
+  }
+}
+
+export class ERR_SOCKET_BAD_PORT extends NodeError {
+  constructor(name: string, port: any, allowZero: boolean) {
+    const operator = allowZero ? '>=' : '>';
+    super(
+      'ERR_SOCKET_BAD_PORT',
+      `${name} should be ${operator} 0 and < 65536. Received ${typeof port}.`
+    );
+  }
+}
+
+export class EPIPE extends NodeError {
+  constructor() {
+    super('EPIPE', 'This socket has been ended by the other party');
+  }
+}
+
+export class ERR_SOCKET_CLOSED_BEFORE_CONNECTION extends NodeError {
+  constructor() {
+    super(
+      'ERR_SOCKET_CLOSED_BEFORE_CONNETION',
+      'Socket closed before connection established'
+    );
+  }
+}
+
+export class ERR_SOCKET_CLOSED extends NodeError {
+  constructor() {
+    super('ERR_SOCKET_CLOSED', 'Socket is closed');
+  }
+}
+
+export class ERR_SOCKET_CONNECTING extends NodeError {
+  constructor() {
+    super('ERR_SOCKET_CONNECTING', 'Socket is already connecting');
+  }
+}
+
 export function aggregateTwoErrors(innerError: any, outerError: any) {
   if (innerError && outerError && innerError !== outerError) {
     if (Array.isArray(outerError.errors)) {

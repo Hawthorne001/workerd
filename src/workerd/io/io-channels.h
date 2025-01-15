@@ -8,6 +8,7 @@
 #include <workerd/io/io-util.h>
 #include <workerd/io/trace.h>
 
+#include <capnp/capability.h>  // for Capability
 #include <kj/debug.h>
 #include <kj/string.h>
 
@@ -22,7 +23,7 @@ class WorkerInterface;
 // Interface for talking to the Cache API. Needs to be declared here so that IoContext can
 // contain it.
 class CacheClient {
-public:
+ public:
   // Get the default namespace, i.e. the one that fetch() will use for caching.
   //
   // The returned client is intended to be used for one request. `cfBlobJson` and `parentSpan` have
@@ -41,7 +42,7 @@ public:
 // A timer instance, used to back Date.now(), setTimeout(), etc. This object may implement
 // Spectre mitigations.
 class TimerChannel {
-public:
+ public:
   // Call each time control enters the isolate to set up the clock.
   virtual void syncTime() = 0;
 
@@ -81,7 +82,7 @@ public:
 // all methods throw exceptions, then the Worker will be completely unable to communicate with
 // anything in the world except for the client -- this is a useful property for sandboxing!
 class IoChannelFactory {
-public:
+ public:
   // Contains metadata attached to an outgoing subrequest from a worker, independent of the type
   // of request.
   struct SubrequestMetadata {
@@ -133,7 +134,7 @@ public:
   // sent, and they will be delivered in the order they are sent (e-order). This is an I/O type
   // so it is only valid within the `IoContext` where it was created.
   class ActorChannel {
-  public:
+   public:
     // Start a new request to this actor.
     //
     // Note that not all `metadata` properties make sense here, but it didn't seem worth defining

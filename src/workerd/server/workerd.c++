@@ -3,8 +3,10 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "server.h"
+#include "workerd-api.h"
 
 #include <workerd/io/compatibility-date.capnp.h>
+#include <workerd/io/compatibility-date.h>
 #include <workerd/io/supported-compatibility-date.capnp.h>
 #include <workerd/jsg/setup.h>
 #include <workerd/rust/cxx-integration/lib.rs.h>
@@ -15,7 +17,6 @@
 
 #include <fcntl.h>
 #include <openssl/rand.h>
-#include <pyodide/generated/pyodide_extra.capnp.h>
 #include <sys/stat.h>
 
 #include <capnp/dynamic.h>
@@ -82,7 +83,7 @@ static kj::StringPtr getVersionString() {
 // =======================================================================================
 
 class EntropySourceImpl: public kj::EntropySource {
-public:
+ public:
   void generate(kj::ArrayPtr<kj::byte> buffer) override {
     KJ_ASSERT(RAND_bytes(buffer.begin(), buffer.size()) == 1);
   }
@@ -94,7 +95,7 @@ public:
 // Result<T, E>, it seems like such a slog.
 
 class CliError {
-public:
+ public:
   CliError(kj::String description): description(kj::mv(description)) {}
   kj::String description;
 };
@@ -130,7 +131,7 @@ constexpr capnp::ReaderOptions CONFIG_READER_OPTIONS = {
 
 // Class which uses inotify to watch a set of files and alert when they change.
 class FileWatcher {
-public:
+ public:
   FileWatcher(kj::UnixEventPort& port)
       : inotifyFd(makeInotify()),
         observer(port, inotifyFd, kj::UnixEventPort::FdObserver::OBSERVE_READ) {}
@@ -192,17 +193,15 @@ public:
     }
   }
 
-private:
-  kj::AutoCloseFd inotifyFd;
+ private:
+  kj::OwnFd inotifyFd;
   kj::UnixEventPort::FdObserver observer;
 
   kj::HashMap<kj::String, int> watches;
   kj::HashMap<int, kj::HashSet<kj::String>> filesWatched;
 
-  static kj::AutoCloseFd makeInotify() {
-    int fd;
-    KJ_SYSCALL(fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC));
-    return kj::AutoCloseFd(fd);
+  static kj::OwnFd makeInotify() {
+    return KJ_SYSCALL_FD(inotify_init1(IN_NONBLOCK | IN_CLOEXEC));
   }
 };
 
@@ -219,7 +218,7 @@ private:
 // Apple provides the FSEvents API as an alternative, but it seems way more complicated and I
 // can't tell if it would provide a real advantage. Plus, kqueue works on BSD systems.
 class FileWatcher {
-public:
+ public:
   FileWatcher(kj::UnixEventPort& port)
       : kqueueFd(makeKqueue()),
         observer(port, kqueueFd, kj::UnixEventPort::FdObserver::OBSERVE_READ) {}
@@ -233,17 +232,13 @@ public:
       KJ_IF_SOME(fd, f.getFd()) {
         // We need to duplicate the FD because the original will probably be closed later and
         // closing the FD unregisters it from kqueue.
-        int duped;
-        KJ_SYSCALL(duped = dup(fd));
-        watchFd(kj::AutoCloseFd(duped));
+        watchFd(KJ_SYSCALL_FD(dup(fd)));
         return;
       }
     }
 
     // No existing file, open from disk.
-    int fd;
-    KJ_SYSCALL(fd = open(path.toNativeString(true).cStr(), O_RDONLY));
-    watchFd(kj::AutoCloseFd(fd));
+    watchFd(KJ_SYSCALL_FD(open(path.toNativeString(true).cStr(), O_RDONLY)));
   }
 
   kj::Promise<void> onChange() {
@@ -269,20 +264,18 @@ public:
     }
   }
 
-private:
-  kj::AutoCloseFd kqueueFd;
+ private:
+  kj::OwnFd kqueueFd;
   kj::UnixEventPort::FdObserver observer;
-  kj::Vector<kj::AutoCloseFd> filesWatched;
+  kj::Vector<kj::OwnFd> filesWatched;
 
-  static kj::AutoCloseFd makeKqueue() {
-    int fd_;
-    KJ_SYSCALL(fd_ = kqueue());
-    auto fd = kj::AutoCloseFd(fd_);
+  static kj::OwnFd makeKqueue() {
+    auto fd = KJ_SYSCALL_FD(kqueue());
     KJ_SYSCALL(fcntl(fd, F_SETFD, FD_CLOEXEC));
     return kj::mv(fd);
   }
 
-  void watchFd(kj::AutoCloseFd fd) {
+  void watchFd(kj::OwnFd fd) {
     KJ_SYSCALL(fcntl(fd, F_SETFD, FD_CLOEXEC));
 
     struct kevent change;
@@ -299,7 +292,7 @@ private:
 #elif _WIN32
 
 class FileWatcher {
-public:
+ public:
   FileWatcher(kj::Win32EventPort& port) {}
 
   bool isSupported() {
@@ -312,14 +305,14 @@ public:
     return kj::NEVER_DONE;
   }
 
-private:
+ private:
 };
 
 #else
 
 // Dummy FileWatcher implementation for operating systems that aren't supported yet.
 class FileWatcher {
-public:
+ public:
   FileWatcher(kj::UnixEventPort& port) {}
 
   bool isSupported() {
@@ -332,7 +325,7 @@ public:
     return kj::NEVER_DONE;
   }
 
-private:
+ private:
 };
 
 #endif  // #__linux__, #else
@@ -347,9 +340,9 @@ kj::Maybe<kj::Own<capnp::SchemaFile>> tryImportBulitin(kj::StringPtr name);
 // These callbacks also give us more control over error reporting, in particular the ability
 // to not throw an exception on the first error seen.
 class SchemaFileImpl final: public capnp::SchemaFile {
-public:
+ public:
   class ErrorReporter {
-  public:
+   public:
     virtual void reportParsingError(
         kj::StringPtr file, SourcePos start, SourcePos end, kj::StringPtr message) = 0;
   };
@@ -438,7 +431,7 @@ public:
     errorReporter.reportParsingError(displayName, start, end, message);
   }
 
-private:
+ private:
   const kj::Directory& root;
   kj::PathPtr current;
 
@@ -469,7 +462,7 @@ private:
 //   schema nodes rather than re-parse the file from scratch? This is tricky as some information
 //   is lost after compilation which is needed to compile dependents, e.g. aliases are erased.
 class BuiltinSchemaFileImpl final: public capnp::SchemaFile {
-public:
+ public:
   BuiltinSchemaFileImpl(kj::StringPtr name, kj::StringPtr content): name(name), content(content) {}
 
   kj::StringPtr getDisplayName() const override {
@@ -500,7 +493,7 @@ public:
     KJ_FAIL_ASSERT("parse error in built-in schema?", start.line, start.column, message);
   }
 
-private:
+ private:
   kj::StringPtr name;
   kj::StringPtr content;
 };
@@ -525,7 +518,7 @@ kj::Maybe<kj::Own<capnp::SchemaFile>> tryImportBulitin(kj::StringPtr name) {
 // There is no use for loopback sockets in production since direct service bindings are more
 // efficient while solving the same problems.
 class NetworkWithLoopback final: public kj::Network {
-public:
+ public:
   NetworkWithLoopback(kj::Network& inner, kj::AsyncIoProvider& ioProvider)
       : inner(inner),
         ioProvider(ioProvider),
@@ -562,7 +555,7 @@ public:
         inner.restrictPeers(allow, deny), ioProvider, loopbackEnabled);
   }
 
-private:
+ private:
   kj::Network& inner;
   kj::Own<kj::Network> ownInner;
   kj::AsyncIoProvider& ioProvider KJ_UNUSED;
@@ -587,7 +580,7 @@ private:
   static constexpr kj::StringPtr PREFIX = "loopback:"_kj;
 
   class LoopbackAddr final: public kj::NetworkAddress {
-  public:
+   public:
     LoopbackAddr(NetworkWithLoopback& parent, kj::StringPtr name)
         : parent(parent),
           name(kj::str(name)) {}
@@ -616,13 +609,13 @@ private:
       return kj::str(PREFIX, name);
     }
 
-  private:
+   private:
     NetworkWithLoopback& parent;
     kj::String name;
   };
 
   class LoopbackReceiver final: public kj::ConnectionReceiver {
-  public:
+   public:
     LoopbackReceiver(ConnectionQueue& queue): queue(queue) {}
 
     kj::Promise<kj::Own<kj::AsyncIoStream>> accept() override {
@@ -633,7 +626,7 @@ private:
       return 0;
     }
 
-  private:
+   private:
     ConnectionQueue& queue;
   };
 };
@@ -641,7 +634,7 @@ private:
 // =======================================================================================
 
 class CliMain final: public SchemaFileImpl::ErrorReporter {
-public:
+ public:
   CliMain(kj::ProcessContext& context, char** argv)
       : context(context),
         argv(argv),
@@ -815,7 +808,24 @@ public:
         context, getVersionString(), "Outputs the package lock file used by Pyodide.");
     return builder
         .callAfterParsing([]() -> kj::MainBuilder::Validity {
-      printf("%s\n", PYODIDE_LOCK->cStr());
+      static const PythonConfig config{
+        .packageDiskCacheRoot = kj::none,
+        .pyodideDiskCacheRoot = kj::none,
+        .createSnapshot = false,
+        .createBaselineSnapshot = false,
+      };
+
+      capnp::MallocMessageBuilder message;
+      // TODO(EW-8977): Implement option to specify python worker flags.
+      auto features = message.getRoot<CompatibilityFlags>();
+      features.setPythonWorkers(true);
+      auto pythonRelease = KJ_ASSERT_NONNULL(getPythonSnapshotRelease(features));
+      auto version = getPythonBundleName(pythonRelease);
+      KJ_ASSERT_NONNULL(fetchPyodideBundle(config, version), "Failed to get Pyodide bundle");
+
+      auto lock = KJ_ASSERT_NONNULL(config.pyodideBundleManager.getPyodideLock(pythonRelease));
+
+      printf("%s\n", lock.cStr());
       fflush(stdout);
       return true;
     }).build();
@@ -1378,7 +1388,7 @@ public:
   }
 #endif
 
-private:
+ private:
   kj::ProcessContext& context;
   char** argv;
 
@@ -1447,7 +1457,7 @@ private:
     if (fd < 0) {
       return kj::none;
     }
-    return ExeInfo{kj::str(path), kj::newDiskFile(kj::AutoCloseFd(fd))};
+    return ExeInfo{kj::str(path), kj::newDiskFile(kj::OwnFd(fd))};
   }
 #endif
 

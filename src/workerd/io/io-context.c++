@@ -18,15 +18,15 @@
 namespace workerd {
 
 static thread_local IoContext* threadLocalRequest = nullptr;
-static thread_local void* threadId = nullptr;
+
+static const kj::EventLoopLocal<int> threadId;
 
 static void* getThreadId() {
-  if (threadId == nullptr) threadId = new int;
-  return threadId;
+  return threadId.get();
 }
 
 class IoContext::TimeoutManagerImpl final: public TimeoutManager {
-public:
+ public:
   class TimeoutState;
   using Map = std::map<TimeoutId, TimeoutState>;
   using Iterator = Map::iterator;
@@ -55,7 +55,7 @@ public:
     }
   }
 
-private:
+ private:
   struct IdAndIterator {
     TimeoutId id;
     Iterator it;
@@ -100,7 +100,7 @@ private:
 };
 
 class IoContext::TimeoutManagerImpl::TimeoutState {
-public:
+ public:
   TimeoutState(TimeoutManagerImpl& manager, TimeoutParameters params);
   ~TimeoutState();
 
@@ -201,11 +201,13 @@ IoContext::IoContext(ThreadContext& thread,
 IoContext::IncomingRequest::IoContext_IncomingRequest(kj::Own<IoContext> contextParam,
     kj::Own<IoChannelFactory> ioChannelFactoryParam,
     kj::Own<RequestObserver> metricsParam,
-    kj::Maybe<kj::Own<WorkerTracer>> workerTracer)
+    kj::Maybe<kj::Own<WorkerTracer>> workerTracer,
+    tracing::InvocationSpanContext invocationSpanContext)
     : context(kj::mv(contextParam)),
       metrics(kj::mv(metricsParam)),
       workerTracer(kj::mv(workerTracer)),
-      ioChannelFactory(kj::mv(ioChannelFactoryParam)) {}
+      ioChannelFactory(kj::mv(ioChannelFactoryParam)),
+      invocationSpanContext(kj::mv(invocationSpanContext)) {}
 
 // A call to delivered() implies a promise to call drain() later (or one of the other methods
 // that sets waitedForWaitUntil). So, we can now safely add the request to
@@ -476,7 +478,7 @@ kj::Promise<IoContext_IncomingRequest::FinishScheduledResult> IoContext::Incomin
 }
 
 class IoContext::PendingEvent: public kj::Refcounted {
-public:
+ public:
   explicit PendingEvent(IoContext& context): maybeContext(context) {}
   ~PendingEvent() noexcept(false);
   KJ_DISALLOW_COPY_AND_MOVE(PendingEvent);
@@ -837,11 +839,11 @@ kj::Own<WorkerInterface> IoContext::getSubrequestChannelWithSpans(uint channel,
     bool isInHouse,
     kj::Maybe<kj::String> cfBlobJson,
     kj::ConstString operationName,
-    std::initializer_list<SpanTagParams> tags) {
+    kj::Vector<Span::Tag> tags) {
   return getSubrequest(
       [&](TraceContext& tracing, IoChannelFactory& channelFactory) {
-    for (const SpanTagParams& tag: tags) {
-      tracing.userSpan.setTag(kj::mv(tag.key), kj::str(tag.value));
+    for (Span::Tag& tag: tags) {
+      tracing.userSpan.setTag(kj::mv(tag.key), kj::mv(tag.value));
     }
     return getSubrequestChannelImpl(
         channel, isInHouse, kj::mv(cfBlobJson), tracing, channelFactory);
@@ -895,7 +897,7 @@ kj::Own<kj::HttpClient> IoContext::getHttpClientWithSpans(uint channel,
     bool isInHouse,
     kj::Maybe<kj::String> cfBlobJson,
     kj::ConstString operationName,
-    std::initializer_list<SpanTagParams> tags) {
+    kj::Vector<Span::Tag> tags) {
   return asHttpClient(getSubrequestChannelWithSpans(
       channel, isInHouse, kj::mv(cfBlobJson), kj::mv(operationName), kj::mv(tags)));
 }
@@ -1239,7 +1241,7 @@ void IoContext::runFinalizers(Worker::AsyncLock& asyncLock) {
 namespace {
 
 class CacheSerializedInputStream final: public kj::AsyncInputStream {
-public:
+ public:
   CacheSerializedInputStream(
       kj::Own<kj::AsyncInputStream> inner, kj::Own<kj::PromiseFulfiller<void>> fulfiller)
       : inner(kj::mv(inner)),
@@ -1261,7 +1263,7 @@ public:
     return inner->pumpTo(output, amount);
   }
 
-private:
+ private:
   kj::Own<kj::AsyncInputStream> inner;
   kj::Own<kj::PromiseFulfiller<void>> fulfiller;
 };

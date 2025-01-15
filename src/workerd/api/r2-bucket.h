@@ -15,6 +15,24 @@ class Headers;
 
 namespace workerd::api::public_beta {
 
+struct StringTagParams {
+  kj::LiteralStringConst key;
+  kj::StringPtr value;
+};
+
+struct R2UserTracing {
+  kj::LiteralStringConst op;
+  StringTagParams method;
+  // Passing Maybe<kj::StringPtr> instead of Maybe<StringTagParams> here – this avoids a branch on
+  // the caller side when bucket is already a Maybe, which is more convenient.
+  kj::Maybe<kj::StringPtr> bucket;
+  kj::Maybe<StringTagParams> extraTag;
+};
+
+// Helper for creating R2 HTTP Client with the right span tags across operations. This is much
+// cleaner than setting span tags directly in each function.
+kj::Own<kj::HttpClient> r2GetClient(IoContext& context, uint subrequestChannel, R2UserTracing user);
+
 kj::Array<kj::byte> cloneByteArray(const kj::Array<kj::byte>& arr);
 kj::ArrayPtr<kj::StringPtr> fillR2Path(
     kj::StringPtr pathStorage[1], const kj::Maybe<kj::String>& bucket);
@@ -23,7 +41,7 @@ class R2MultipartUpload;
 
 // A capability to an R2 Bucket.
 class R2Bucket: public jsg::Object {
-protected:
+ protected:
   struct friend_tag_t {};
 
   struct FeatureFlags {
@@ -32,7 +50,7 @@ protected:
     bool listHonorsIncludes;
   };
 
-public:
+ public:
   // `clientIndex` is what to pass to IoContext::getHttpClient() to get an HttpClient
   // representing this namespace.
   explicit R2Bucket(CompatibilityFlags::Reader featureFlags, uint clientIndex)
@@ -78,8 +96,9 @@ public:
   struct GetOptions {
     jsg::Optional<kj::OneOf<Conditional, jsg::Ref<Headers>>> onlyIf;
     jsg::Optional<kj::OneOf<Range, jsg::Ref<Headers>>> range;
+    jsg::Optional<kj::OneOf<kj::Array<byte>, kj::String>> ssecKey;
 
-    JSG_STRUCT(onlyIf, range);
+    JSG_STRUCT(onlyIf, range, ssecKey);
     JSG_STRUCT_TS_OVERRIDE(R2GetOptions);
   };
 
@@ -95,7 +114,7 @@ public:
   };
 
   class Checksums: public jsg::Object {
-  public:
+   public:
     Checksums(jsg::Optional<kj::Array<kj::byte>> md5,
         jsg::Optional<kj::Array<kj::byte>> sha1,
         jsg::Optional<kj::Array<kj::byte>> sha256,
@@ -189,9 +208,18 @@ public:
     jsg::Optional<kj::OneOf<kj::Array<kj::byte>, jsg::NonCoercible<kj::String>>> sha384;
     jsg::Optional<kj::OneOf<kj::Array<kj::byte>, jsg::NonCoercible<kj::String>>> sha512;
     jsg::Optional<kj::String> storageClass;
+    jsg::Optional<kj::OneOf<kj::Array<byte>, kj::String>> ssecKey;
 
-    JSG_STRUCT(
-        onlyIf, httpMetadata, customMetadata, md5, sha1, sha256, sha384, sha512, storageClass);
+    JSG_STRUCT(onlyIf,
+        httpMetadata,
+        customMetadata,
+        md5,
+        sha1,
+        sha256,
+        sha384,
+        sha512,
+        storageClass,
+        ssecKey);
     JSG_STRUCT_TS_OVERRIDE(R2PutOptions);
   };
 
@@ -199,13 +227,14 @@ public:
     jsg::Optional<kj::OneOf<HttpMetadata, jsg::Ref<Headers>>> httpMetadata;
     jsg::Optional<jsg::Dict<kj::String>> customMetadata;
     jsg::Optional<kj::String> storageClass;
+    jsg::Optional<kj::OneOf<kj::Array<byte>, kj::String>> ssecKey;
 
-    JSG_STRUCT(httpMetadata, customMetadata, storageClass);
+    JSG_STRUCT(httpMetadata, customMetadata, storageClass, ssecKey);
     JSG_STRUCT_TS_OVERRIDE(R2MultipartOptions);
   };
 
   class HeadResult: public jsg::Object {
-  public:
+   public:
     HeadResult(kj::String name,
         kj::String version,
         double size,
@@ -215,7 +244,8 @@ public:
         jsg::Optional<HttpMetadata> httpMetadata,
         jsg::Optional<jsg::Dict<kj::String>> customMetadata,
         jsg::Optional<Range> range,
-        kj::String storageClass)
+        kj::String storageClass,
+        jsg::Optional<kj::String> ssecKeyMd5)
         : name(kj::mv(name)),
           version(kj::mv(version)),
           size(size),
@@ -225,7 +255,8 @@ public:
           httpMetadata(kj::mv(httpMetadata)),
           customMetadata(kj::mv(customMetadata)),
           range(kj::mv(range)),
-          storageClass(kj::mv(storageClass)) {}
+          storageClass(kj::mv(storageClass)),
+          ssecKeyMd5(kj::mv(ssecKeyMd5)) {}
 
     kj::String getName() const {
       return kj::str(name);
@@ -250,6 +281,9 @@ public:
     }
     kj::StringPtr getStorageClass() const {
       return storageClass;
+    }
+    jsg::Optional<kj::StringPtr> getSSECKeyMd5() const {
+      return ssecKeyMd5;
     }
 
     jsg::Optional<HttpMetadata> getHttpMetadata() const {
@@ -285,6 +319,7 @@ public:
       JSG_LAZY_READONLY_INSTANCE_PROPERTY(customMetadata, getCustomMetadata);
       JSG_LAZY_READONLY_INSTANCE_PROPERTY(range, getRange);
       JSG_LAZY_READONLY_INSTANCE_PROPERTY(storageClass, getStorageClass);
+      JSG_LAZY_READONLY_INSTANCE_PROPERTY(ssecKeyMd5, getSSECKeyMd5);
       JSG_METHOD(writeHttpMetadata);
       JSG_TS_OVERRIDE(R2Object);
     }
@@ -296,9 +331,10 @@ public:
       tracker.trackField("checksums", checksums);
       tracker.trackField("httpMetadata", httpMetadata);
       tracker.trackField("customMetadata", customMetadata);
+      tracker.trackField("ssecKeyMd5", ssecKeyMd5);
     }
 
-  protected:
+   protected:
     kj::String name;
     kj::String version;
     double size;
@@ -310,11 +346,12 @@ public:
 
     jsg::Optional<Range> range;
     kj::String storageClass;
+    jsg::Optional<kj::String> ssecKeyMd5;
     friend class R2Bucket;
   };
 
   class GetResult: public HeadResult {
-  public:
+   public:
     GetResult(kj::String name,
         kj::String version,
         double size,
@@ -325,6 +362,7 @@ public:
         jsg::Optional<jsg::Dict<kj::String>> customMetadata,
         jsg::Optional<Range> range,
         kj::String storageClass,
+        jsg::Optional<kj::String> ssecKeyMd5,
         jsg::Ref<ReadableStream> body)
         : HeadResult(kj::mv(name),
               kj::mv(version),
@@ -335,7 +373,8 @@ public:
               kj::mv(KJ_ASSERT_NONNULL(httpMetadata)),
               kj::mv(KJ_ASSERT_NONNULL(customMetadata)),
               range,
-              kj::mv(storageClass)),
+              kj::mv(storageClass),
+              kj::mv(ssecKeyMd5)),
           body(kj::mv(body)) {}
 
     jsg::Ref<ReadableStream> getBody() {
@@ -361,6 +400,7 @@ public:
       JSG_METHOD(blob);
       JSG_TS_OVERRIDE(R2ObjectBody {
         json<T>(): Promise<T>;
+        arrayBuffer(): Promise<ArrayBuffer>;
       });
     }
 
@@ -368,7 +408,7 @@ public:
       tracker.trackField("body", body);
     }
 
-  private:
+   private:
     jsg::Ref<ReadableStream> body;
   };
 
@@ -505,12 +545,12 @@ public:
     tracker.trackField("jwt", jwt);
   }
 
-protected:
+ protected:
   kj::Maybe<kj::StringPtr> adminBucketName() const {
     return adminBucket;
   }
 
-private:
+ private:
   FeatureFlags featureFlags;
   uint clientIndex;
   kj::Maybe<kj::String> adminBucket;

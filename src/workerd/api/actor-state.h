@@ -7,6 +7,7 @@
 //
 // See actor.h for APIs used by other Workers to talk to Actors.
 
+#include <workerd/api/actor.h>
 #include <workerd/io/actor-cache.h>
 #include <workerd/io/actor-id.h>
 #include <workerd/io/compatibility-date.capnp.h>
@@ -20,6 +21,7 @@ namespace workerd::api {
 class SqlStorage;
 
 // Forward-declared to avoid dependency cycle (actor.h -> http.h -> basics.h -> actor-state.h)
+class DurableObject;
 class DurableObjectId;
 class WebSocket;
 
@@ -31,7 +33,7 @@ jsg::JsValue deserializeV8Value(
 // Common implementation of DurableObjectStorage and DurableObjectTransaction. This class is
 // designed to be used as a mixin.
 class DurableObjectStorageOperations {
-public:
+ public:
   struct GetOptions {
     jsg::Optional<bool> allowConcurrency;
     jsg::Optional<bool> noCache;
@@ -121,7 +123,7 @@ public:
       jsg::Lock& js, kj::Date scheduledTime, jsg::Optional<SetAlarmOptions> options);
   jsg::Promise<void> deleteAlarm(jsg::Lock& js, jsg::Optional<SetAlarmOptions> options);
 
-protected:
+ protected:
   typedef kj::StringPtr OpName;
   static constexpr OpName OP_GET = "get()"_kj;
   static constexpr OpName OP_GET_ALARM = "getAlarm()"_kj;
@@ -153,7 +155,7 @@ protected:
     return kj::mv(options);
   }
 
-private:
+ private:
   jsg::Promise<jsg::JsRef<jsg::JsValue>> getOne(
       jsg::Lock& js, kj::String key, const GetOptions& options);
   jsg::Promise<jsg::JsRef<jsg::JsValue>> getMultiple(
@@ -172,10 +174,20 @@ private:
 class DurableObjectTransaction;
 
 class DurableObjectStorage: public jsg::Object, public DurableObjectStorageOperations {
-public:
+ public:
   DurableObjectStorage(IoPtr<ActorCacheInterface> cache, bool enableSql)
       : cache(kj::mv(cache)),
         enableSql(enableSql) {}
+
+  // This constructor is only used when we're setting up the `DurableObjectStorage` for a replica
+  // Durable Object instance. Replicas need to retain a reference to their primary so they can
+  // forward write requests, and since we already have a reference to the primary prior to
+  // constructing the `DurableObjectStorage`, we can just pass in the information we need to build
+  // a stub. The stub is then stored in `maybePrimary`.
+  DurableObjectStorage(IoPtr<ActorCacheInterface> cache,
+      bool enableSql,
+      kj::Own<IoChannelFactory::ActorChannel> primaryActorChannel,
+      kj::Own<ActorIdFactory::ActorId> primaryActorId);
 
   ActorCacheInterface& getActorCacheInterface() {
     return *cache;
@@ -241,6 +253,8 @@ public:
   // thus it is idempotent.
   void ensureReplicas();
 
+  jsg::Optional<jsg::Ref<DurableObject>> getPrimary(jsg::Lock& js);
+
   JSG_RESOURCE_TYPE(DurableObjectStorage, CompatibilityFlags::Reader flags) {
     JSG_METHOD(get);
     JSG_METHOD(list);
@@ -262,6 +276,7 @@ public:
 
     if (flags.getWorkerdExperimental()) {
       JSG_METHOD(waitForBookmark);
+      JSG_READONLY_INSTANCE_PROPERTY(primary, getPrimary);
     }
 
     if (flags.getReplicaRouting()) {
@@ -285,21 +300,24 @@ public:
     });
   }
 
-protected:
+ protected:
   ActorCacheOps& getCache(kj::StringPtr op) override;
 
   bool useDirectIo() override {
     return false;
   }
 
-private:
+ private:
   IoPtr<ActorCacheInterface> cache;
   bool enableSql;
   uint transactionSyncDepth = 0;
+
+  // Set if this is a replica Durable Object.
+  kj::Maybe<jsg::Ref<DurableObject>> maybePrimary;
 };
 
 class DurableObjectTransaction final: public jsg::Object, public DurableObjectStorageOperations {
-public:
+ public:
   DurableObjectTransaction(IoOwn<ActorCacheInterface::Transaction> cacheTxn)
       : cacheTxn(kj::mv(cacheTxn)) {}
 
@@ -343,14 +361,14 @@ public:
     });
   }
 
-protected:
+ protected:
   ActorCacheOps& getCache(kj::StringPtr op) override;
 
   bool useDirectIo() override {
     return false;
   }
 
-private:
+ private:
   // Becomes null when committed or rolled back.
   kj::Maybe<IoOwn<ActorCacheInterface::Transaction>> cacheTxn;
 
@@ -364,7 +382,7 @@ private:
 // used for colo-local namespaces.
 class ActorState: public jsg::Object {
   // TODO(cleanup): Remove getPersistent method that isn't supported for colo-local actors anymore.
-public:
+ public:
   ActorState(Worker::Actor::Id actorId,
       kj::Maybe<jsg::JsRef<jsg::JsValue>> transient,
       kj::Maybe<jsg::Ref<DurableObjectStorage>> persistent);
@@ -402,14 +420,14 @@ public:
     tracker.trackField("persistent", persistent);
   }
 
-private:
+ private:
   Worker::Actor::Id id;
   kj::Maybe<jsg::JsRef<jsg::JsValue>> transient;
   kj::Maybe<jsg::Ref<DurableObjectStorage>> persistent;
 };
 
 class WebSocketRequestResponsePair: public jsg::Object {
-public:
+ public:
   WebSocketRequestResponsePair(kj::String request, kj::String response)
       : request(kj::mv(request)),
         response(kj::mv(response)) {};
@@ -436,14 +454,14 @@ public:
     tracker.trackField("response", response);
   }
 
-private:
+ private:
   kj::String request;
   kj::String response;
 };
 
 // The type passed as the first parameter to durable object class's constructor.
 class DurableObjectState: public jsg::Object {
-public:
+ public:
   DurableObjectState(Worker::Actor::Id actorId, kj::Maybe<jsg::Ref<DurableObjectStorage>> storage);
 
   void waitUntil(kj::Promise<void> promise);
@@ -553,7 +571,7 @@ public:
     tracker.trackField("storage", storage);
   }
 
-private:
+ private:
   Worker::Actor::Id id;
   kj::Maybe<jsg::Ref<DurableObjectStorage>> storage;
 

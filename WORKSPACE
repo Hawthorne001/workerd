@@ -14,7 +14,7 @@ deps_gen()
 load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive", "http_file")
 
-NODE_VERSION = "20.14.0"
+NODE_VERSION = "22.11.0"
 
 load("@bazel_skylib//:workspace.bzl", "bazel_skylib_workspace")
 
@@ -122,7 +122,7 @@ filegroup(
 #
 git_repository(
     name = "com_google_absl",
-    commit = "ed3733b91e472a1e7a641c1f0c1e6c0ea698e958",
+    commit = "dc257ad54f38739767a6cb26eb57fd51c37bfe3c",
     remote = "https://chromium.googlesource.com/chromium/src/third_party/abseil-cpp.git",
 )
 
@@ -175,7 +175,7 @@ git_repository(
     name = "zlib",
     build_file = "//:build/BUILD.zlib",
     # Must match the version used by v8
-    commit = "d3aea2341cdeaf7e717bc257a59aa7a9407d318a",
+    commit = "fa9f14143c7938e6a1d18443900efee7a1e5e669",
     remote = "https://chromium.googlesource.com/chromium/src/third_party/zlib.git",
 )
 
@@ -280,32 +280,34 @@ esbuild_register_toolchains(
 
 http_archive(
     name = "v8",
-    integrity = "sha256-2jQHW96t3jpEsjOlv9yyjgUem3kKNnpDAIDR4PPFSnw=",
+    integrity = "sha256-s+oY+fAG0cXTGmKDxbioUudjUciK1dU2reu7lZ+uB1w=",
     patch_args = ["-p1"],
     patches = [
         "//:patches/v8/0001-Allow-manually-setting-ValueDeserializer-format-vers.patch",
         "//:patches/v8/0002-Allow-manually-setting-ValueSerializer-format-versio.patch",
-        "//:patches/v8/0003-Add-ArrayBuffer-MaybeNew.patch",
-        "//:patches/v8/0004-Allow-Windows-builds-under-Bazel.patch",
-        "//:patches/v8/0005-Disable-bazel-whole-archive-build.patch",
-        "//:patches/v8/0006-Speed-up-V8-bazel-build-by-always-using-target-cfg.patch",
-        "//:patches/v8/0007-Implement-Promise-Context-Tagging.patch",
-        "//:patches/v8/0008-Enable-V8-shared-linkage.patch",
-        "//:patches/v8/0009-Randomize-the-initial-ExecutionContextId-used-by-the.patch",
-        "//:patches/v8/0010-increase-visibility-of-virtual-method.patch",
-        "//:patches/v8/0011-Add-ValueSerializer-SetTreatFunctionsAsHostObjects.patch",
-        "//:patches/v8/0012-Set-torque-generator-path-to-external-v8.-This-allow.patch",
-        "//:patches/v8/0013-Modify-where-to-look-for-fp16-dependency.-This-depen.patch",
-        "//:patches/v8/0014-Expose-v8-Symbol-GetDispose.patch",
-        "//:patches/v8/0015-Rename-V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE-V8_COMPR.patch",
-        "//:patches/v8/0016-Revert-TracedReference-deref-API-removal.patch",
-        "//:patches/v8/0017-Revert-heap-Add-masm-specific-unwinding-annotations-.patch",
-        "//:patches/v8/0018-Update-illegal-invocation-error-message-in-v8.patch",
-        "//:patches/v8/0019-Implement-cross-request-context-promise-resolve-hand.patch",
-        "//:patches/v8/0020-Modify-where-to-look-for-fast_float-dependency.patch",
+        "//:patches/v8/0003-Allow-Windows-builds-under-Bazel.patch",
+        "//:patches/v8/0004-Disable-bazel-whole-archive-build.patch",
+        "//:patches/v8/0005-Speed-up-V8-bazel-build-by-always-using-target-cfg.patch",
+        "//:patches/v8/0006-Implement-Promise-Context-Tagging.patch",
+        "//:patches/v8/0007-Randomize-the-initial-ExecutionContextId-used-by-the.patch",
+        "//:patches/v8/0008-increase-visibility-of-virtual-method.patch",
+        "//:patches/v8/0009-Add-ValueSerializer-SetTreatFunctionsAsHostObjects.patch",
+        "//:patches/v8/0010-Set-torque-generator-path-to-external-v8.-This-allow.patch",
+        "//:patches/v8/0011-Modify-where-to-look-for-fp16-dependency.-This-depen.patch",
+        "//:patches/v8/0012-Expose-v8-Symbol-GetDispose.patch",
+        "//:patches/v8/0013-Revert-TracedReference-deref-API-removal.patch",
+        "//:patches/v8/0014-Revert-heap-Add-masm-specific-unwinding-annotations-.patch",
+        "//:patches/v8/0015-Update-illegal-invocation-error-message-in-v8.patch",
+        "//:patches/v8/0016-Implement-cross-request-context-promise-resolve-hand.patch",
+        "//:patches/v8/0017-Modify-where-to-look-for-fast_float-dependency.patch",
+        "//:patches/v8/0018-Return-rejected-promise-from-WebAssembly.compile-if-.patch",
+        "//:patches/v8/0019-codegen-Don-t-pass-a-nullptr-in-InitUnwindingRecord-.patch",
+        "//:patches/v8/0020-Add-another-slot-in-the-isolate-for-embedder.patch",
+        "//:patches/v8/0021-Add-ValueSerializer-SetTreatProxiesAsHostObjects.patch",
+        "//:patches/v8/0022-Disable-memory-leak-assert-when-shutting-down-V8.patch",
     ],
-    strip_prefix = "v8-13.0.245.16",
-    url = "https://github.com/v8/v8/archive/refs/tags/13.0.245.16.tar.gz",
+    strip_prefix = "v8-13.1.201.8",
+    url = "https://github.com/v8/v8/archive/refs/tags/13.1.201.8.tar.gz",
 )
 
 git_repository(
@@ -319,14 +321,9 @@ git_repository(
 
 http_archive(
     name = "perfetto",
-    patch_args = ["-p1"],
-    patches = [
-        "//:patches/perfetto/0001-Rename-ui-build-to-ui-build.sh-to-allow-bazel-build-.patch",
-    ],
-    repo_mapping = {"@perfetto_dep_zlib": "@zlib"},
-    sha256 = "9bbd38a0f074038bde6ccbcf5f2ff32587eb60faec254932268ecb6f17f18186",
-    strip_prefix = "perfetto-47.0",
-    url = "https://github.com/google/perfetto/archive/refs/tags/v47.0.tar.gz",
+    integrity = "sha256-jRxr9E8b2wmKtwzWDaPOa25zHk6yHdUrJSfL3PhdmE0=",
+    strip_prefix = "perfetto-48.1",
+    url = "https://github.com/google/perfetto/archive/refs/tags/v48.1.tar.gz",
 )
 
 # For use with perfetto
@@ -395,92 +392,4 @@ new_local_repository(
     name = "com_cloudflare_lol_html",
     build_file = "@workerd//deps/rust:BUILD.lolhtml",
     path = "empty",
-)
-
-# Dev tools
-
-FILE_GROUP = """filegroup(
-	name="file",
-	srcs=glob(["**"])
-)"""
-
-http_archive(
-    name = "ruff-darwin-arm64",
-    build_file_content = FILE_GROUP,
-    integrity = "sha256-KbGnLDXu1bIkD/Nl4fRdB7wMQLkzGhGcK1nMpEwPMi4=",
-    strip_prefix = "ruff-aarch64-apple-darwin",
-    url = "https://github.com/astral-sh/ruff/releases/download/0.6.7/ruff-aarch64-apple-darwin.tar.gz",
-)
-
-http_archive(
-    name = "ruff-darwin-amd64",
-    build_file_content = FILE_GROUP,
-    integrity = "sha256-W3JL0sldkm6kbaB9+mrFVoY32wR0CDhpi7SxkJ2Oug0=",
-    strip_prefix = "ruff-x86_64-apple-darwin",
-    url = "https://github.com/astral-sh/ruff/releases/download/0.6.7/ruff-x86_64-apple-darwin.tar.gz",
-)
-
-http_archive(
-    name = "ruff-linux-arm64",
-    build_file_content = FILE_GROUP,
-    integrity = "sha256-7nBZdr686PdPmCFa2EN65OHgmDCfqB3ygFaXVgUDRuM=",
-    strip_prefix = "ruff-aarch64-unknown-linux-gnu",
-    url = "https://github.com/astral-sh/ruff/releases/download/0.6.7/ruff-aarch64-unknown-linux-gnu.tar.gz",
-)
-
-http_archive(
-    name = "ruff-linux-amd64",
-    build_file_content = FILE_GROUP,
-    integrity = "sha256-Uu1+NMFYCfMT4/jtQoH+Uj5+XwZn57+ZWIhbfm8icKg=",
-    strip_prefix = "ruff-x86_64-unknown-linux-gnu",
-    url = "https://github.com/astral-sh/ruff/releases/download/0.6.7/ruff-x86_64-unknown-linux-gnu.tar.gz",
-)
-
-http_archive(
-    name = "ruff-windows-amd64",
-    build_file_content = FILE_GROUP,
-    integrity = "sha256-H2yX4kuLyNdBrkRPhTr61FQqJRyiKeLq4TnMmKE0t2A=",
-    url = "https://github.com/astral-sh/ruff/releases/download/0.6.7/ruff-x86_64-pc-windows-msvc.zip",
-)
-
-# clang-format static binary builds via GH Actions: https://github.com/npaun/bins/blob/master/.github/workflows/llvm.yml
-# TODO(soon): Move this workflow to a repo in the cloudflare GH organization
-
-http_file(
-    name = "clang-format-darwin-arm64",
-    executable = True,
-    integrity = "sha256-1hG7AcfgGL+IBrSCEhD9ed6pvIpZMdXMdhCDGkqzhpA=",
-    url = "https://github.com/npaun/bins/releases/download/llvm-18.1.8/llvm-18.1.8-darwin-arm64-clang-format",
-)
-
-http_file(
-    name = "clang-format-linux-arm64",
-    executable = True,
-    integrity = "sha256-No7G08x7VJ+CkjuhyohcTWymPPm0QUE4EZlkp9Of5jM=",
-    url = "https://github.com/npaun/bins/releases/download/llvm-18.1.8/llvm-18.1.8-linux-arm64-clang-format",
-)
-
-http_file(
-    name = "clang-format-linux-amd64",
-    executable = True,
-    integrity = "sha256-iCbaPg60x60eA9ZIWmSdFva/RD9xOBcJLUwSRK8Gxzk=",
-    url = "https://github.com/npaun/bins/releases/download/llvm-18.1.8/llvm-18.1.8-linux-amd64-clang-format",
-)
-
-http_file(
-    name = "clang-format-windows-amd64",
-    executable = True,
-    integrity = "sha256-4V2KXVoX5Ny1J7ABfVRx0nAHpAGegykhzac7zW3nK0k=",
-    url = "https://github.com/npaun/bins/releases/download/llvm-18.1.8/llvm-18.1.8-windows-amd64-clang-format.exe",
-)
-
-# ========================================================================================
-# Web Platform Tests
-
-http_archive(
-    name = "wpt",
-    build_file = "//:build/BUILD.wpt",
-    integrity = "sha256-Hxn/D6x6lI9ISlCQFq620sb8x9iXplVzXPV6zumX84A=",
-    strip_prefix = "wpt-merge_pr_48695",
-    url = "https://github.com/web-platform-tests/wpt/archive/refs/tags/merge_pr_48695.tar.gz",
 )

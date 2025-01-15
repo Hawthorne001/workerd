@@ -2,8 +2,6 @@ from asyncio import Future, Queue, ensure_future, sleep
 from contextlib import contextmanager
 from inspect import isawaitable
 
-from fastapi import Depends, Request
-
 ASGI = {"spec_version": "2.0", "version": "3.0"}
 
 
@@ -14,11 +12,6 @@ def run_in_background(coro):
     fut = ensure_future(coro)
     background_tasks.add(fut)
     fut.add_done_callback(background_tasks.discard)
-
-
-@Depends
-async def env(request: Request):
-    return request.scope["env"]
 
 
 @contextmanager
@@ -37,7 +30,11 @@ def acquire_js_buffer(pybuffer):
 def request_to_scope(req, env, ws=False):
     from js import URL
 
-    headers = [tuple(x) for x in req.headers]
+    # @app.get("/example")
+    # async def example(request: Request):
+    #     request.headers.get("content-type")
+    # - this will error if header is not "bytes" as in ASGI spec.
+    headers = [(k.lower().encode(), v.encode()) for k, v in req.headers]
     url = URL.new(req.url)
     assert url.protocol[-1] == ":"
     scheme = url.protocol[:-1]
@@ -80,11 +77,10 @@ async def start_application(app):
 
     async def send(got):
         if got["type"] == "lifespan.startup.complete":
-            print("Application startup complete.")
-            print("Uvicorn running")
             ready.set_result(None)
+            return
         if got["type"] == "lifespan.shutdown.complete":
-            print("Application shutdown complete")
+            return
         raise RuntimeError(f"Unexpected lifespan event {got['type']}")
 
     run_in_background(
@@ -112,8 +108,13 @@ async def process_request(app, req, env):
     result = Future()
 
     async def response_gen():
-        async for data in req.body:
-            yield {"body": data.to_bytes(), "more_body": True, "type": "http.request"}
+        if req.body:
+            async for data in req.body:
+                yield {
+                    "body": data.to_bytes(),
+                    "more_body": True,
+                    "type": "http.request",
+                }
         yield {"body": b"", "more_body": False, "type": "http.request"}
 
     responses = response_gen()
@@ -126,7 +127,8 @@ async def process_request(app, req, env):
         nonlocal headers
         if got["type"] == "http.response.start":
             status = got["status"]
-            headers = got["headers"]
+            # Like above, we need to convert byte-pairs into string explicitly.
+            headers = [(k.decode(), v.decode()) for k, v in got["headers"]]
         if got["type"] == "http.response.body":
             # intentionally leak body to avoid a copy
             #
@@ -207,3 +209,16 @@ async def fetch(app, req, env):
 
 async def websocket(app, req):
     return await process_websocket(app, req)
+
+
+def __getattr__(name):
+    if name == "env":
+        from fastapi import Depends, Request
+
+        @Depends
+        async def env(request: Request):
+            return request.scope["env"]
+
+        return env
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

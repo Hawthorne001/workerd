@@ -430,7 +430,7 @@ struct CompatibilityFlags @0x8f8c1b68151b6cef {
   pythonWorkers @43 :Bool
       $compatEnableFlag("python_workers")
       $pythonSnapshotRelease(pyodide = "0.26.0a2", pyodideRevision = "2024-03-01",
-          packages = "2024-03-01", backport = 3,
+          packages = "20240829.4", backport = 13,
           baselineSnapshotHash = "d13ce2f4a0ade2e09047b469874dacf4d071ed3558fec4c26f8d0b99d95f77b5")
       $impliedByAfterDate(name = "pythonWorkersDevPyodide", date = "2000-01-01");
   # Enables Python Workers. Access to this flag is not restricted, instead bundles containing
@@ -583,7 +583,7 @@ struct CompatibilityFlags @0x8f8c1b68151b6cef {
   pythonWorkersDevPyodide @58 :Bool
     $compatEnableFlag("python_workers_development")
     $pythonSnapshotRelease(pyodide = "dev", pyodideRevision = "dev",
-          packages = "2024-03-01", backport = 0,
+          packages = "20240829.4", backport = 0,
           baselineSnapshotHash = "92859211804cd350f9e14010afad86e584bdd017dc7acfd94709a87f3220afae")
     $experimental;
   # Enables Python Workers and uses the bundle from the Pyodide source directory directly. For testing only.
@@ -622,13 +622,8 @@ struct CompatibilityFlags @0x8f8c1b68151b6cef {
   # compatibility flag we arrange to have such promise continuations scheduled to run
   # in the correct IoContext if it is still alive, or dropped on the floor with a warning
   # if the correct IoContext is not still alive.
-  pythonExternalBundle @63 :Bool
-      $compatEnableFlag("python_external_bundle")
+  obsolete63 @63 :Bool
       $experimental;
-  # Temporary flag to load Python from external capnproto bundle loaded at runtime.
-  # We plan to turn this on always quite soon. It would be an autogate but we need to test
-  # our logic both at upload time and at runtime, and this seemed like the easiest way to
-  # make sure we keep things in sync.
 
   setToStringTag @64 :Bool
       $compatEnableFlag("set_tostring_tag")
@@ -665,4 +660,23 @@ struct CompatibilityFlags @0x8f8c1b68151b6cef {
   # When enabled, use of top-level await syntax in require() calls will be disallowed.
   # The ecosystem and runtimes are moving to a state where top level await in modules
   # is being strongly discouraged.
+
+  fixupTransformStreamBackpressure @68 :Bool
+      $compatEnableFlag("fixup-transform-stream-backpressure")
+      $compatDisableFlag("original-transform-stream-backpressure")
+      $compatEnableDate("2024-12-16");
+  # A bug in the original implementation of TransformStream failed to apply backpressure
+  # correctly. The fix, however, can break existing implementations that don't account
+  # for the bug so we need to put the fix behind a compat flag.
+
+  # Experimental support for exporting user spans to tail worker.
+  tailWorkerUserSpans @69 :Bool
+      $compatEnableFlag("tail_worker_user_spans")
+      $experimental;
+
+  cacheNoCache @70 :Bool
+      $compatEnableFlag("cache_no_cache_enabled")
+      $compatDisableFlag("cache_no_cache_disabled")
+      $experimental;
+  # Enables the use of cache: no-cache in the fetch api.
 }

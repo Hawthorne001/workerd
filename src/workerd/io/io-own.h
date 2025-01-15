@@ -1,6 +1,5 @@
 #pragma once
 
-#include <workerd/jsg/util.h>
 #include <workerd/util/weak-refs.h>
 
 #include <kj/async-io.h>
@@ -13,6 +12,9 @@
 #include <typeinfo>
 
 namespace workerd {
+namespace jsg {
+class Lock;
+}
 
 class IoContext;
 
@@ -52,7 +54,7 @@ using RemoveIoOwn = typename RemoveIoOwn_<T>::Type;
 // reject() on some Fulfiller object. It can optionally return a warning which should be
 // logged if the inspector is attached.
 class Finalizeable {
-public:
+ public:
   KJ_DISALLOW_COPY_AND_MOVE(Finalizeable);
 
 #ifdef KJ_DEBUG
@@ -66,7 +68,7 @@ public:
   Finalizeable() = default;
 #endif
 
-private:
+ private:
   virtual kj::Maybe<kj::StringPtr> finalize() = 0;
   friend class IoContext;
 
@@ -93,7 +95,7 @@ struct SpecificOwnedObject: public OwnedObject {
 };
 
 class OwnedObjectList {
-public:
+ public:
   OwnedObjectList() = default;
   KJ_DISALLOW_COPY_AND_MOVE(OwnedObjectList);
   ~OwnedObjectList() noexcept(false);
@@ -109,7 +111,7 @@ public:
     return finalizersRan;
   }
 
-private:
+ private:
   kj::Maybe<kj::Own<OwnedObject>> head;
 
   bool finalizersRan = false;
@@ -117,7 +119,7 @@ private:
 
 // Object which receives possibly-cross-thread deletions of owned objects.
 class DeleteQueue: public kj::AtomicRefcounted {
-public:
+ public:
   DeleteQueue(): crossThreadDeleteQueue(State{kj::Vector<OwnedObject*>()}) {}
 
   void scheduleDeletion(OwnedObject* object) const;
@@ -155,7 +157,7 @@ public:
   static void checkFarGet(const DeleteQueue* deleteQueue, const std::type_info& type);
   static void checkWeakGet(workerd::WeakRef<IoContext>& weak);
 
-private:
+ private:
   template <typename T>
   SpecificOwnedObject<T>* addObjectImpl(kj::Own<T> obj, OwnedObjectList& ownedObjects);
 
@@ -169,7 +171,7 @@ private:
 // the DeleteQueue concept that allows us to use the same queue for more than
 // just deletions.
 class IoCrossContextExecutor {
-public:
+ public:
   IoCrossContextExecutor(kj::Own<const DeleteQueue> deleteQueue)
       : deleteQueue(kj::mv(deleteQueue)) {}
 
@@ -177,7 +179,7 @@ public:
   // The target IoContext will be signaled to run the action as soon as it is able.
   void execute(jsg::Lock& js, kj::Function<void(jsg::Lock&)>&& action);
 
-private:
+ private:
   friend class IoContext;
   friend class DeleteQueue;
 
@@ -226,7 +228,7 @@ inline ReverseIoOwn<T> DeleteQueue::addObjectReverse(
 // we can't just do it in IoContext's destructor. As a hack, we customize our pointer
 // to the delete queue to get the tear-down order right.
 class DeleteQueuePtr: public kj::Own<DeleteQueue> {
-public:
+ public:
   DeleteQueuePtr(kj::Own<DeleteQueue> value): kj::Own<DeleteQueue>(kj::mv(value)) {}
   KJ_DISALLOW_COPY_AND_MOVE(DeleteQueuePtr);
   ~DeleteQueuePtr() noexcept(false) {
@@ -251,7 +253,7 @@ public:
 template <typename T>
 class IoOwn {
 
-public:
+ public:
   IoOwn(IoOwn&& other);
   IoOwn(decltype(nullptr)): item(nullptr) {}
   ~IoOwn() noexcept(false);
@@ -279,7 +281,7 @@ public:
   // the one that owns the IoContext.
   void deferGcToContext() &&;
 
-private:
+ private:
   friend class IoContext;
   friend class DeleteQueue;
 
@@ -295,7 +297,7 @@ private:
 // dereferenced unless the isolate is executing on the appropriate event loop thread.
 template <typename T>
 class IoPtr {
-public:
+ public:
   IoPtr(const IoPtr& other): deleteQueue(kj::atomicAddRef(*other.deleteQueue)), ptr(other.ptr) {}
   IoPtr(IoPtr&& other) = default;
 
@@ -305,7 +307,7 @@ public:
   }
   IoPtr& operator=(decltype(nullptr));
 
-private:
+ private:
   friend class IoContext;
   friend class DeleteQueue;
 
@@ -329,7 +331,7 @@ private:
 // using `ReverseIoOwn`.
 template <typename T>
 class ReverseIoOwn {
-public:
+ public:
   ReverseIoOwn(ReverseIoOwn&& other);
   ReverseIoOwn(decltype(nullptr)): item(nullptr) {}
   ~ReverseIoOwn() noexcept(false);
@@ -343,7 +345,7 @@ public:
   ReverseIoOwn& operator=(ReverseIoOwn&& other);
   ReverseIoOwn& operator=(decltype(nullptr));
 
-private:
+ private:
   friend class IoContext;
   friend class DeleteQueue;
 

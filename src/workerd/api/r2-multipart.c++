@@ -6,6 +6,7 @@
 
 #include "r2-bucket.h"
 #include "r2-rpc.h"
+#include "workerd/jsg/jsg.h"
 
 #include <workerd/api/r2-api.capnp.h>
 #include <workerd/util/http-util.h>
@@ -13,23 +14,25 @@
 #include <capnp/compat/json.h>
 #include <capnp/message.h>
 #include <kj/compat/http.h>
+#include <kj/encoding.h>
 
-#include <array>
-#include <cmath>
+#include <regex>
 
 namespace workerd::api::public_beta {
 
 jsg::Promise<R2MultipartUpload::UploadedPart> R2MultipartUpload::uploadPart(jsg::Lock& js,
     int partNumber,
     R2PutValue value,
+    jsg::Optional<UploadPartOptions> options,
     const jsg::TypeHandler<jsg::Ref<R2Error>>& errorType) {
   return js.evalNow([&] {
     JSG_REQUIRE(partNumber >= 1 && partNumber <= 10000, TypeError,
         "Part number must be between 1 and 10000 (inclusive). Actual value was: ", partNumber);
 
     auto& context = IoContext::current();
-    auto client =
-        context.getHttpClient(this->bucket->clientIndex, true, kj::none, "r2_uploadPart"_kjc);
+    auto client = r2GetClient(context, this->bucket->clientIndex,
+        {"r2_uploadPart"_kjc, {"rpc.method"_kjc, "UploadPart"_kjc}, this->bucket->adminBucketName(),
+          {{"cloudflare.r2.upload_id"_kjc, uploadId.asPtr()}}});
 
     capnp::JsonCodec json;
     json.handleByAnnotation<R2BindingRequest>();
@@ -44,6 +47,24 @@ jsg::Promise<R2MultipartUpload::UploadedPart> R2MultipartUpload::uploadPart(jsg:
     uploadPartBuilder.setUploadId(uploadId);
     uploadPartBuilder.setPartNumber(partNumber);
     uploadPartBuilder.setObject(key);
+    KJ_IF_SOME(options, options) {
+      KJ_IF_SOME(ssecKey, options.ssecKey) {
+        auto ssecBuilder = uploadPartBuilder.initSsec();
+        KJ_SWITCH_ONEOF(ssecKey) {
+          KJ_CASE_ONEOF(keyString, kj::String) {
+            JSG_REQUIRE(
+                std::regex_match(keyString.begin(), keyString.end(), std::regex("^[0-9a-f]+$")),
+                Error, "SSE-C Key has invalid format");
+            JSG_REQUIRE(keyString.size() == 64, Error, "SSE-C Key must be 32 bytes in length");
+            ssecBuilder.setKey(kj::str(keyString));
+          }
+          KJ_CASE_ONEOF(keyBuff, kj::Array<byte>) {
+            JSG_REQUIRE(keyBuff.size() == 32, Error, "SSE-C Key must be 32 bytes in length");
+            ssecBuilder.setKey(kj::encodeHex(keyBuff));
+          }
+        }
+      }
+    }
 
     auto requestJson = json.encode(requestBuilder);
     auto bucket = this->bucket->adminBucket.map([](auto&& s) { return kj::str(s); });
@@ -75,8 +96,9 @@ jsg::Promise<jsg::Ref<R2Bucket::HeadResult>> R2MultipartUpload::complete(jsg::Lo
     const jsg::TypeHandler<jsg::Ref<R2Error>>& errorType) {
   return js.evalNow([&] {
     auto& context = IoContext::current();
-    auto client = context.getHttpClient(
-        this->bucket->clientIndex, true, kj::none, "r2_completeMultipartUpload"_kjc);
+    auto client = r2GetClient(context, this->bucket->clientIndex,
+        {"r2_completeMultipartUpload"_kjc, {"rpc.method"_kjc, "CompleteMultipartUpload"_kjc},
+          this->bucket->adminBucketName(), {{"cloudflare.r2.upload_id"_kjc, uploadId.asPtr()}}});
 
     capnp::JsonCodec json;
     json.handleByAnnotation<R2BindingRequest>();
@@ -125,8 +147,9 @@ jsg::Promise<void> R2MultipartUpload::abort(
     jsg::Lock& js, const jsg::TypeHandler<jsg::Ref<R2Error>>& errorType) {
   return js.evalNow([&] {
     auto& context = IoContext::current();
-    auto client = context.getHttpClient(
-        this->bucket->clientIndex, true, kj::none, "r2_abortMultipartUpload"_kjc);
+    auto client = r2GetClient(context, this->bucket->clientIndex,
+        {"r2_abortMultipartUpload"_kjc, {"rpc.method"_kjc, "AbortMultipartUpload"_kjc},
+          this->bucket->adminBucketName(), {{"cloudflare.r2.upload_id"_kjc, uploadId.asPtr()}}});
 
     capnp::JsonCodec json;
     json.handleByAnnotation<R2BindingRequest>();

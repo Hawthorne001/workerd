@@ -586,7 +586,7 @@ jsg::Ref<Headers> Headers::deserialize(
 namespace {
 
 class BodyBufferInputStream final: public ReadableStreamSource {
-public:
+ public:
   BodyBufferInputStream(Body::Buffer buffer)
       : unread(buffer.view),
         ownBytes(kj::mv(buffer.ownBytes)) {}
@@ -618,7 +618,7 @@ public:
     co_return;
   }
 
-private:
+ private:
   kj::ArrayPtr<const byte> unread;
   kj::OneOf<kj::Own<Body::RefcountedBytes>, jsg::Ref<Blob>> ownBytes;
 };
@@ -699,6 +699,12 @@ Body::ExtractedBody Body::extractBody(jsg::Lock& js, Initializer init) {
       buffer = formData->serialize(boundary);
     }
     KJ_CASE_ONEOF(searchParams, jsg::Ref<URLSearchParams>) {
+      auto type = MimeType::FORM_URLENCODED.clone();
+      type.addParam("charset"_kj, "UTF-8"_kj);
+      contentType = type.toString();
+      buffer = searchParams->toString();
+    }
+    KJ_CASE_ONEOF(searchParams, jsg::Ref<url::URLSearchParams>) {
       auto type = MimeType::FORM_URLENCODED.clone();
       type.addParam("charset"_kj, "UTF-8"_kj);
       contentType = type.toString();
@@ -1208,7 +1214,7 @@ kj::Maybe<kj::String> Request::serializeCfBlobJson(jsg::Lock& js) {
       break;
     case CacheMode::NOCACHE:
       ttl = 0;
-      KJ_FALLTHROUGH;
+      break;
     case CacheMode::NONE:
       KJ_UNREACHABLE;
   }
@@ -1233,8 +1239,11 @@ void RequestInitializerDict::validate(jsg::Lock& js) {
 
     // Validate that the cache type is valid
     auto cacheMode = getCacheModeFromName(c);
-    JSG_REQUIRE(cacheMode != Request::CacheMode::NOCACHE, TypeError,
-        kj::str("Unsupported cache mode: ", c));
+
+    if (!FeatureFlags::get(js).getCacheNoCache()) {
+      JSG_REQUIRE(cacheMode != Request::CacheMode::NOCACHE, TypeError,
+          kj::str("Unsupported cache mode: ", c));
+    }
   }
 }
 

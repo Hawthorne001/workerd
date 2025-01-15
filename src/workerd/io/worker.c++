@@ -11,12 +11,14 @@
 #include <workerd/io/cdp.capnp.h>
 #include <workerd/io/compatibility-date.h>
 #include <workerd/io/features.h>
+#include <workerd/io/frankenvalue.h>
 #include <workerd/io/promise-wrapper.h>
 #include <workerd/io/worker.h>
 #include <workerd/jsg/async-context.h>
 #include <workerd/jsg/inspector.h>
 #include <workerd/jsg/jsg.h>
 #include <workerd/jsg/modules-new.h>
+#include <workerd/jsg/script.h>
 #include <workerd/jsg/util.h>
 #include <workerd/util/batch-queue.h>
 #include <workerd/util/color-util.h>
@@ -341,12 +343,12 @@ uint64_t getCurrentThreadId() {
 // Represents a thread's attempt to take an async lock. Each Isolate has a linked list of
 // `AsyncWaiter`s. A particular thread only ever owns one `AsyncWaiter` at a time.
 class Worker::AsyncWaiter: public kj::Refcounted {
-public:
+ public:
   AsyncWaiter(kj::Own<const Isolate> isolate);
   ~AsyncWaiter() noexcept;
   KJ_DISALLOW_COPY_AND_MOVE(AsyncWaiter);
 
-private:
+ private:
   // Executor for this waiter's thread.
   const kj::Executor& executor;
 
@@ -371,14 +373,14 @@ private:
   kj::Maybe<AsyncWaiter&> next;
   kj::Maybe<AsyncWaiter&>* prev;
 
-  static thread_local AsyncWaiter* threadCurrentWaiter;
+  static const kj::EventLoopLocal<AsyncWaiter*> threadCurrentWaiter;
 
   friend class Worker::Isolate;
   friend class Worker::AsyncLock;
 };
 
 class Worker::InspectorClient: public v8_inspector::V8InspectorClient {
-public:
+ public:
   // Wall time in milliseconds with millisecond precision. console.time() and friends rely on this
   // function to implement timers.
   double currentTimeMS() override {
@@ -443,7 +445,7 @@ public:
     runMessageLoop = false;
   }
 
-private:
+ private:
   static bool dispatchOneMessageDuringPause(Worker::Isolate::InspectorChannelImpl& channel);
 
   struct InspectorTimerInfo {
@@ -531,7 +533,7 @@ struct Worker::Isolate::Impl {
   // Always use this wrapper in code which may face lock contention (that's mostly everywhere).
   class Lock {
 
-  public:
+   public:
     explicit Lock(
         const Worker::Isolate& isolate, Worker::LockType lockType, jsg::V8StackScope& stackScope)
         : impl(*isolate.impl),
@@ -627,7 +629,7 @@ struct Worker::Isolate::Impl {
     // believes it has exclusive access.
     bool checkInWithLimitEnforcer(Worker::Isolate& isolate);
 
-  private:
+   private:
     const Impl& impl;
     IsolateObserver::LockRecord metrics;
     ThreadProgressCounter progressCounter;
@@ -638,7 +640,7 @@ struct Worker::Isolate::Impl {
 
     ConsoleMode consoleMode;
 
-  public:
+   public:
     kj::Own<jsg::Lock> lock;
   };
 
@@ -672,6 +674,8 @@ struct Worker::Isolate::Impl {
         actorCacheLru(limitEnforcer.getActorCacheLruOptions()) {
     jsg::runInV8Stack([&](jsg::V8StackScope& stackScope) {
       auto lock = api.lock(stackScope);
+
+      limitEnforcer.customizeIsolate(lock->v8Isolate);
       if (inspectorPolicy != InspectorPolicy::DISALLOW) {
         // We just created our isolate, so we don't need to use Isolate::Impl::Lock.
         KJ_ASSERT(!isMultiTenantProcess(), "inspector is not safe in multi-tenant processes");
@@ -684,7 +688,7 @@ struct Worker::Isolate::Impl {
 namespace {
 
 class CpuProfilerDisposer final: public kj::Disposer {
-public:
+ public:
   virtual void disposeImpl(void* pointer) const override {
     reinterpret_cast<v8::CpuProfiler*>(pointer)->Dispose();
   }
@@ -969,27 +973,30 @@ const HeapSnapshotDeleter HeapSnapshotDeleter::INSTANCE;
 }  // namespace
 
 Worker::Isolate::Isolate(kj::Own<Api> apiParam,
+    kj::Own<IsolateObserver> metricsParam,
     kj::StringPtr id,
+    kj::Own<IsolateLimitEnforcer> limitEnforcerParam,
     InspectorPolicy inspectorPolicy,
     ConsoleMode consoleMode)
-    : metrics(kj::atomicAddRef(apiParam->getMetrics())),
+    : metrics(kj::mv(metricsParam)),
       id(kj::str(id)),
+      limitEnforcer(kj::mv(limitEnforcerParam)),
       api(kj::mv(apiParam)),
-      limitEnforcer(api->getLimitEnforcer()),
       consoleMode(consoleMode),
       featureFlagsForFl(makeCompatJson(decompileCompatibilityFlagsForFl(api->getFeatureFlags()))),
-      impl(kj::heap<Impl>(*api, *metrics, limitEnforcer, inspectorPolicy)),
+      impl(kj::heap<Impl>(*api, *metrics, *limitEnforcer, inspectorPolicy)),
       weakIsolateRef(WeakIsolateRef::wrap(this)),
       traceAsyncContextKey(kj::refcounted<jsg::AsyncContextFrame::StorageKey>()) {
+  api->setIsolateObserver(*metrics);
   metrics->created();
   // We just created our isolate, so we don't need to use Isolate::Impl::Lock (nor an async lock).
   jsg::runInV8Stack([&](jsg::V8StackScope& stackScope) {
     auto lock = api->lock(stackScope);
     auto features = api->getFeatureFlags();
 
-    KJ_DASSERT(lock->v8Isolate->GetNumberOfDataSlots() >= 3);
-    KJ_DASSERT(lock->v8Isolate->GetData(3) == nullptr);
-    lock->v8Isolate->SetData(3, this);
+    KJ_DASSERT(lock->v8Isolate->GetNumberOfDataSlots() >= jsg::SET_DATA_SLOTS_IN_USE);
+    KJ_DASSERT(lock->v8Isolate->GetData(jsg::SET_DATA_ISOLATE) == nullptr);
+    lock->v8Isolate->SetData(jsg::SET_DATA_ISOLATE, this);
 
     lock->setCaptureThrowsAsRejections(features.getCaptureThrowsAsRejections());
     lock->setCommonJsExportDefault(features.getExportCommonJsDefaultNamespace());
@@ -1279,6 +1286,10 @@ Worker::Script::Script(kj::Own<const Isolate> isolateParam,
         // (Undocumented, as usual.)
         context =
             v8::Context::New(lock.v8Isolate, nullptr, v8::ObjectTemplate::New(lock.v8Isolate));
+        // We need to set the highest used index in every context we create to be a nullptr
+        // This is because we might later on call GetAlignedPointerFromEmbedderData which fails with
+        // a fatal error if the array is smaller than the given index.
+        context->SetAlignedPointerInEmbedderData(3, nullptr);
       }
 
       JSG_WITHIN_CONTEXT_SCOPE(lock, context, [&](jsg::Lock& js) {
@@ -1325,7 +1336,7 @@ Worker::Script::Script(kj::Own<const Isolate> isolateParam,
             KJ_SWITCH_ONEOF(source) {
               KJ_CASE_ONEOF(script, ScriptSource) {
                 impl->globals =
-                    script.compileGlobals(lock, isolate->getApi(), isolate->impl->metrics);
+                    script.compileGlobals(lock, isolate->getApi(), isolate->getApi().getObserver());
 
                 {
                   // It's unclear to me if CompileUnboundScript() can get trapped in any infinite loops or
@@ -1334,7 +1345,7 @@ Worker::Script::Script(kj::Own<const Isolate> isolateParam,
                   auto limitScope =
                       isolate->getLimitEnforcer().enterStartupJs(lock, limitErrorOrTime);
                   impl->unboundScriptOrMainModule =
-                      jsg::NonModuleScript::compile(script.mainScript, lock, script.mainScriptName);
+                      jsg::NonModuleScript::compile(lock, script.mainScript, script.mainScriptName);
                 }
 
                 break;
@@ -1343,8 +1354,13 @@ Worker::Script::Script(kj::Own<const Isolate> isolateParam,
               KJ_CASE_ONEOF(modulesSource, ModulesSource) {
                 this->isPython = modulesSource.isPython;
                 if (!isolate->getApi().getFeatureFlags().getNewModuleRegistry()) {
-                  auto limitScope =
-                      isolate->getLimitEnforcer().enterStartupJs(lock, limitErrorOrTime);
+                  kj::Own<void> limitScope;
+                  if (isPython) {
+                    limitScope =
+                        isolate->getLimitEnforcer().enterStartupPython(js, limitErrorOrTime);
+                  } else {
+                    limitScope = isolate->getLimitEnforcer().enterStartupJs(js, limitErrorOrTime);
+                  }
                   auto& modules = KJ_ASSERT_NONNULL(impl->moduleContext)->getModuleRegistry();
                   impl->configureDynamicImports(lock, modules);
                   modulesSource.compileModules(lock, isolate->getApi());
@@ -1378,7 +1394,7 @@ Worker::Isolate::~Isolate() noexcept(false) {
 
   // Update the isolate stats one last time to make sure we're accurate for cleanup in
   // `evicted()`.
-  limitEnforcer.reportMetrics(*metrics);
+  limitEnforcer->reportMetrics(*metrics);
 
   metrics->evicted();
   weakIsolateRef->invalidate();
@@ -1412,7 +1428,7 @@ Worker::Script::~Script() noexcept(false) {
 }
 
 const Worker::Isolate& Worker::Isolate::from(jsg::Lock& js) {
-  auto ptr = js.v8Isolate->GetData(3);
+  auto ptr = js.v8Isolate->GetData(jsg::SET_DATA_ISOLATE);
   KJ_ASSERT(ptr != nullptr);
   return *static_cast<const Worker::Isolate*>(ptr);
 }
@@ -1534,7 +1550,7 @@ kj::Maybe<jsg::JsObject> tryResolveMainModule(jsg::Lock& js,
       // The V8 module API is weird. Only the first call to Evaluate() will evaluate the
       // module, even if subsequent calls pass a different context. Verify that we didn't
       // switch contexts.
-      KJ_ASSERT(jsg::check(ns->GetCreationContext()) == js.v8Context(),
+      KJ_ASSERT(jsg::check(ns->GetCreationContext(js.v8Isolate)) == js.v8Context(),
           "module was originally instantiated in a different context");
 
       return jsg::JsObject(ns);
@@ -1646,7 +1662,7 @@ Worker::Worker(kj::Own<const Script> scriptParam,
               KJ_CASE_ONEOF(unboundScript, jsg::NonModuleScript) {
                 auto limitScope =
                     script->isolate->getLimitEnforcer().enterStartupJs(lock, limitErrorOrTime);
-                unboundScript.run(lock.v8Context());
+                unboundScript.run(lock);
               }
               KJ_CASE_ONEOF(mainModule, kj::Path) {
                 KJ_IF_SOME(ns,
@@ -1661,7 +1677,12 @@ Worker::Worker(kj::Own<const Script> scriptParam,
                     KJ_SWITCH_ONEOF(handler.value) {
                       KJ_CASE_ONEOF(obj, api::ExportedHandler) {
                         obj.env = lock.v8Ref(bindingsScope.As<v8::Value>());
-                        obj.ctx = jsg::alloc<api::ExecutionContext>();
+                        // TODO(cleanup): Unfortunately, for non-class-based handlers, we have
+                        //   always created only a single `ctx` object and reused it for all
+                        //   requests. This is weird and obviously wrong but changing it probably
+                        //   requires a compat flag. Until then, connection properties will not be
+                        //   available for non-class handlers.
+                        obj.ctx = jsg::alloc<api::ExecutionContext>(lock);
 
                         impl->namedHandlers.insert(kj::mv(handler.name), kj::mv(obj));
                       }
@@ -1842,7 +1863,7 @@ void Worker::handleLog(jsg::Lock& js,
     auto& ioContext = IoContext::current();
     KJ_IF_SOME(tracer, ioContext.getWorkerTracer()) {
       auto timestamp = ioContext.now();
-      tracer.log(timestamp, level, message());
+      tracer.addLog(timestamp, level, message());
     }
   }
 
@@ -1950,7 +1971,7 @@ static inline kj::Own<T> fakeOwn(T& ref) {
 }
 
 kj::Maybe<kj::Own<api::ExportedHandler>> Worker::Lock::getExportedHandler(
-    kj::Maybe<kj::StringPtr> name, kj::Maybe<Worker::Actor&> actor) {
+    kj::Maybe<kj::StringPtr> name, Frankenvalue props, kj::Maybe<Worker::Actor&> actor) {
   KJ_IF_SOME(a, actor) {
     KJ_IF_SOME(h, a.getHandler()) {
       return fakeOwn(h);
@@ -1962,8 +1983,8 @@ kj::Maybe<kj::Own<api::ExportedHandler>> Worker::Lock::getExportedHandler(
     return fakeOwn(h);
   } else KJ_IF_SOME(cls, worker.impl->statelessClasses.find(n)) {
     jsg::Lock& js = *this;
-    auto handler = kj::heap(cls(
-        js, jsg::alloc<api::ExecutionContext>(), KJ_ASSERT_NONNULL(worker.impl->env).addRef(js)));
+    auto handler = kj::heap(cls(js, jsg::alloc<api::ExecutionContext>(js, props.toJs(js)),
+        KJ_ASSERT_NONNULL(worker.impl->env).addRef(js)));
 
     // HACK: We set handler.env and handler.ctx to undefined because we already passed the real
     //   env and ctx into the constructor, and we want the handler methods to act like they take
@@ -2228,7 +2249,7 @@ void Worker::Lock::validateHandlers(ValidationErrorReporter& errorReporter) {
 // =======================================================================================
 // AsyncLock implementation
 
-thread_local Worker::AsyncWaiter* Worker::AsyncWaiter::threadCurrentWaiter = nullptr;
+const kj::EventLoopLocal<Worker::AsyncWaiter*> Worker::AsyncWaiter::threadCurrentWaiter;
 
 Worker::Isolate::AsyncWaiterList::~AsyncWaiterList() noexcept {
   // It should be impossible for this list to be non-empty since each member of the list holds a
@@ -2257,7 +2278,7 @@ kj::Promise<Worker::AsyncLock> Worker::Isolate::takeAsyncLockImpl(
   }
 
   for (uint threadWaitingDifferentLockCount = 0;; ++threadWaitingDifferentLockCount) {
-    AsyncWaiter* waiter = AsyncWaiter::threadCurrentWaiter;
+    AsyncWaiter* waiter = *AsyncWaiter::threadCurrentWaiter;
 
     if (waiter == nullptr) {
       // Thread is not currently waiting on a lock.
@@ -2327,7 +2348,7 @@ Worker::AsyncWaiter::AsyncWaiter(kj::Own<const Isolate> isolateParam)
   *lock->tail = this;
   lock->tail = &next;
 
-  threadCurrentWaiter = this;
+  *threadCurrentWaiter = this;
 
   __atomic_add_fetch(&isolate->impl->lockAttemptGauge, 1, __ATOMIC_RELAXED);
 }
@@ -2358,20 +2379,22 @@ Worker::AsyncWaiter::~AsyncWaiter() noexcept {
     }
   }
 
-  KJ_ASSERT(threadCurrentWaiter == this);
-  threadCurrentWaiter = nullptr;
+  auto& w = *threadCurrentWaiter;
+  KJ_ASSERT(w == this);
+  w = nullptr;
 }
 
 kj::Promise<void> Worker::AsyncLock::whenThreadIdle() {
+  AsyncWaiter*& currentWaiter = *AsyncWaiter::threadCurrentWaiter;
   for (;;) {
-    if (auto waiter = AsyncWaiter::threadCurrentWaiter; waiter != nullptr) {
-      co_await waiter->releasePromise;
+    if (currentWaiter != nullptr) {
+      co_await currentWaiter->releasePromise;
       continue;
     }
 
     co_await kj::yieldUntilQueueEmpty();
 
-    if (AsyncWaiter::threadCurrentWaiter == nullptr) {
+    if (currentWaiter == nullptr) {
       co_return;
     }
     // Whoops, a new lock attempt appeared, loop.
@@ -2387,7 +2410,7 @@ kj::Promise<void> Worker::AsyncLock::whenThreadIdle() {
 // but we don't want to keep buffering extremely large ones, so just discard buffered data
 // upon hitting a limit and don't return any body to the devtools frontend afterwards.
 class Worker::Isolate::LimitedBodyWrapper: public kj::OutputStream {
-public:
+ public:
   LimitedBodyWrapper(size_t limit = 1 * 1024 * 1024): limit(limit) {
     if (limit > 0) {
       inner.emplace();
@@ -2423,7 +2446,7 @@ public:
     }
   }
 
-private:
+ private:
   size_t size = 0;
   size_t limit = 0;
   kj::Maybe<kj::VectorOutputStream> inner;
@@ -2436,7 +2459,7 @@ struct MessageQueue {
 };
 
 class Worker::Isolate::InspectorChannelImpl final: public v8_inspector::V8Inspector::Channel {
-public:
+ public:
   InspectorChannelImpl(kj::Own<const Worker::Isolate> isolateParam,
       kj::Own<const kj::Executor> isolateThreadExecutor,
       kj::WebSocket& webSocket)
@@ -2587,6 +2610,10 @@ public:
           //   We don't know which contexts exist in this isolate, so I guess we have to
           //   create one. Ugh.
           auto dummyContext = v8::Context::New(lock->v8Isolate);
+          // We need to set the highest used index in every context we create to be a nullptr
+          // This is because we might later on call GetAlignedPointerFromEmbedderData which fails with
+          // a fatal error if the array is smaller than the given index.
+          dummyContext->SetAlignedPointerInEmbedderData(3, nullptr);
           auto& inspector = *KJ_ASSERT_NONNULL(isolate.impl->inspector);
           inspector.contextCreated(v8_inspector::V8ContextInfo(dummyContext, 1,
               v8_inspector::StringView(reinterpret_cast<const uint8_t*>("Worker"), 6)));
@@ -2681,13 +2708,13 @@ public:
   // debugger statement.
   bool dispatchOneMessageDuringPause();
 
-private:
+ private:
   // Class that manages the I/O for devtools connections. I/O is performed on the
   // thread associated with the InspectorService (the thread that calls attachInspector).
   // Most of the public API is intended for code running on the isolate thread, such as
   // the InspectorChannelImpl and the InspectorClient.
   class WebSocketIoHandler final {
-  public:
+   public:
     WebSocketIoHandler(kj::Own<const kj::Executor> isolateThreadExecutor, kj::WebSocket& webSocket)
         : isolateThreadExecutor(kj::mv(isolateThreadExecutor)),
           webSocket(webSocket) {
@@ -2760,7 +2787,7 @@ private:
       outgoingQueueNotifier->notify();
     }
 
-  private:
+   private:
     static kj::Maybe<kj::String> pollMessage(MessageQueue& messageQueue) {
       if (messageQueue.head < messageQueue.messages.size()) {
         kj::String message = kj::mv(messageQueue.messages[messageQueue.head++]);
@@ -3171,7 +3198,7 @@ struct Worker::Actor::Impl {
       classInstance;
 
   class HooksImpl: public InputGate::Hooks, public OutputGate::Hooks, public ActorCache::Hooks {
-  public:
+   public:
     HooksImpl(kj::Own<Loopback> loopback, TimerChannel& timerChannel, ActorObserver& metrics)
         : loopback(kj::mv(loopback)),
           timerChannel(timerChannel),
@@ -3228,7 +3255,7 @@ struct Worker::Actor::Impl {
       metrics.storageWriteCompleted(latency);
     }
 
-  private:
+   private:
     kj::Own<Loopback> loopback;  // only for updateAlarmInMemory()
     TimerChannel& timerChannel;  // only for afterLimitTimeout() and updateAlarmInMemory()
     ActorObserver& metrics;
@@ -3793,7 +3820,7 @@ kj::Own<const Worker::Script> Worker::Isolate::newScript(kj::StringPtr scriptId,
 }
 
 void Worker::Isolate::completedRequest() const {
-  limitEnforcer.completedRequest(id);
+  limitEnforcer->completedRequest(id);
 }
 
 bool Worker::Isolate::isInspectorEnabled() const {
@@ -3822,7 +3849,7 @@ double getWallTimeForProcessSandboxOnly() {
 }  // namespace
 
 class Worker::Isolate::ResponseStreamWrapper final: public kj::AsyncOutputStream {
-public:
+ public:
   ResponseStreamWrapper(kj::Own<const Isolate> isolate,
       kj::String requestId,
       kj::Own<kj::AsyncOutputStream> inner,
@@ -3932,7 +3959,7 @@ public:
     return inner->whenWriteDisconnected();
   }
 
-private:
+ private:
   using InspectorLock = InspectorChannelImpl::InspectorLock;
 
   kj::Own<const Isolate> constIsolate;
@@ -3945,7 +3972,7 @@ private:
 };
 
 class Worker::Isolate::SubrequestClient final: public WorkerInterface {
-public:
+ public:
   explicit SubrequestClient(kj::Own<const Isolate> isolate,
       kj::Own<WorkerInterface> inner,
       kj::HttpHeaderId contentEncodingHeaderId,
@@ -3970,7 +3997,7 @@ public:
   kj::Promise<AlarmResult> runAlarm(kj::Date scheduledTime, uint32_t retryCount) override;
   kj::Promise<CustomEvent::Result> customEvent(kj::Own<CustomEvent> event) override;
 
-private:
+ private:
   kj::Own<const Isolate> constIsolate;
   kj::Own<WorkerInterface> inner;
   kj::HttpHeaderId contentEncodingHeaderId;
@@ -4135,7 +4162,7 @@ kj::Promise<void> Worker::Isolate::SubrequestClient::request(kj::HttpMethod meth
   typedef decltype(signalResponse) SignalResponse;
 
   class ResponseWrapper final: public kj::HttpService::Response {
-  public:
+   public:
     ResponseWrapper(
         kj::HttpService::Response& inner, kj::String requestId, SignalResponse signalResponse)
         : inner(inner),
@@ -4158,7 +4185,7 @@ kj::Promise<void> Worker::Isolate::SubrequestClient::request(kj::HttpMethod meth
       return kj::mv(webSocket);
     }
 
-  private:
+   private:
     kj::HttpService::Response& inner;
     kj::String requestId;
     SignalResponse signalResponse;

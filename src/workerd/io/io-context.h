@@ -47,10 +47,10 @@ class IoContext;
 // those will be emitted all at once with a single header message followed by contextual
 // information for each individual collected instance.
 class WarningAggregator final: public kj::AtomicRefcounted {
-public:
+ public:
   // The IoContext will maintain a map of WarningAggregators based on an opaque key.
   class Key final {
-  public:
+   public:
     Key(): hash(kj::hashCode(this)) {}
     KJ_DISALLOW_COPY_AND_MOVE(Key);
     inline uint hashCode() const {
@@ -60,13 +60,13 @@ public:
       return this == &other;
     }
 
-  private:
+   private:
     uint hash;
   };
 
   // Captures the contextual information for a specific aggregated warning.
   class WarningContext {
-  public:
+   public:
     virtual ~WarningContext() noexcept(false) = default;
     virtual kj::String toString(jsg::Lock& js) = 0;
   };
@@ -84,7 +84,7 @@ public:
 
   using Map = kj::HashMap<const Key&, kj::Own<WarningAggregator>>;
 
-private:
+ private:
   kj::Own<const Worker> worker;
   kj::Own<RequestObserver> requestMetrics;
   EmitCallback emitter;
@@ -106,11 +106,12 @@ private:
 // usage) to the "current" incoming request, which is defined as the newest request that hasn't
 // already completed.
 class IoContext_IncomingRequest final {
-public:
+ public:
   IoContext_IncomingRequest(kj::Own<IoContext> context,
       kj::Own<IoChannelFactory> ioChannelFactory,
       kj::Own<RequestObserver> metrics,
-      kj::Maybe<kj::Own<WorkerTracer>> workerTracer);
+      kj::Maybe<kj::Own<WorkerTracer>> workerTracer,
+      tracing::InvocationSpanContext invocationSpanContext);
   KJ_DISALLOW_COPY_AND_MOVE(IoContext_IncomingRequest);
   ~IoContext_IncomingRequest() noexcept(false);
 
@@ -160,11 +161,22 @@ public:
     return workerTracer;
   }
 
-private:
+  // The invocation span context is a unique identifier for a specific
+  // worker invocation.
+  tracing::InvocationSpanContext& getInvocationSpanContext() {
+    return invocationSpanContext;
+  }
+
+ private:
   kj::Own<IoContext> context;
   kj::Own<RequestObserver> metrics;
   kj::Maybe<kj::Own<WorkerTracer>> workerTracer;
   kj::Own<IoChannelFactory> ioChannelFactory;
+
+  // The invocation span context identifies the trace id, invocation id, and root
+  // span for the current request. Every invocation of a worker function always
+  // has a root span, even if it is not explicitly traced.
+  tracing::InvocationSpanContext invocationSpanContext;
 
   bool wasDelivered = false;
 
@@ -205,7 +217,7 @@ private:
 // like this. We don't want people leaking heavy objects or allowing simultaneous requests to
 // interfere with each other.
 class IoContext final: public kj::Refcounted, private kj::TaskSet::ErrorHandler {
-public:
+ public:
   class TimeoutManagerImpl;
 
   // Construct a new IoContext. Before using it, you must also create an IncomingRequest.
@@ -698,19 +710,11 @@ public:
       kj::Maybe<kj::String> cfBlobJson,
       kj::ConstString operationName);
 
-  // As above, but with list of span tags to add.
-  // TODO(o11y): For now this only supports literal values based on initializer_list constraints.
-  // Add syntactic sugar to kj::vector so that we can pass in a vector more ergonomically and use
-  // that instead to support other value types.
-  struct SpanTagParams {
-    kj::LiteralStringConst key;
-    kj::LiteralStringConst value;
-  };
   kj::Own<WorkerInterface> getSubrequestChannelWithSpans(uint channel,
       bool isInHouse,
       kj::Maybe<kj::String> cfBlobJson,
       kj::ConstString operationName,
-      std::initializer_list<SpanTagParams> tags);
+      kj::Vector<Span::Tag> tags);
 
   // Like getSubrequestChannel() but doesn't enforce limits. Use for trusted paths only.
   kj::Own<WorkerInterface> getSubrequestChannelNoChecks(uint channel,
@@ -730,7 +734,7 @@ public:
       bool isInHouse,
       kj::Maybe<kj::String> cfBlobJson,
       kj::ConstString operationName,
-      std::initializer_list<SpanTagParams> tags);
+      kj::Vector<Span::Tag> tags);
 
   // Convenience methods that call getSubrequest*() and adapt the returned WorkerInterface objects
   // to HttpClient.
@@ -776,6 +780,10 @@ public:
   SpanParent getCurrentTraceSpan();
   SpanParent getCurrentUserTraceSpan();
 
+  tracing::InvocationSpanContext& getInvocationSpanContext() {
+    return getCurrentIncomingRequest().invocationSpanContext;
+  }
+
   // Returns a builder for recording tracing spans (or a no-op builder if tracing is inactive).
   // If called while the JS lock is held, uses the trace information from the current async
   // context, if available.
@@ -816,7 +824,7 @@ public:
     return *getCurrentIncomingRequest().ioChannelFactory;
   }
 
-private:
+ private:
   ThreadContext& thread;
 
   kj::Own<WeakRef> selfRef = kj::refcounted<WeakRef>(kj::Badge<IoContext>(), *this);
@@ -905,7 +913,7 @@ private:
   kj::Maybe<jsg::JsRef<jsg::JsObject>> promiseContextTag;
 
   class Runnable {
-  public:
+   public:
     virtual void run(Worker::Lock& lock) = 0;
   };
   void runImpl(Runnable& runnable,
@@ -1262,7 +1270,7 @@ kj::_::ReducePromises<RemoveIoOwn<T>> IoContext::awaitJs(jsg::Lock& js, jsg::Pro
       }
     }
 
-  private:
+   private:
     kj::Maybe<kj::StringPtr> finalize() override {
       if (!isDone) {
         fulfiller->reject(JSG_KJ_EXCEPTION(FAILED, Error, "Promise will never complete."));

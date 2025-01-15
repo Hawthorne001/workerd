@@ -46,7 +46,7 @@ static void v8DcheckError(const char* file, int line, const char* message) {
 }
 
 class PlatformDisposer final: public kj::Disposer {
-public:
+ public:
   virtual void disposeImpl(void* pointer) const override {
     delete static_cast<v8::Platform*>(pointer);
   }
@@ -161,7 +161,7 @@ void V8System::setFatalErrorCallback(FatalErrorCallback* callback) {
 }
 
 IsolateBase& IsolateBase::from(v8::Isolate* isolate) {
-  return *static_cast<IsolateBase*>(isolate->GetData(0));
+  return *static_cast<IsolateBase*>(isolate->GetData(SET_DATA_ISOLATE_BASE));
 }
 
 void IsolateBase::buildEmbedderGraph(v8::Isolate* isolate, v8::EmbedderGraph* graph, void* data) {
@@ -339,10 +339,11 @@ IsolateBase::IsolateBase(const V8System& system,
     ptr->SetOOMErrorHandler(&oomError);
 
     ptr->SetMicrotasksPolicy(v8::MicrotasksPolicy::kExplicit);
-    ptr->SetData(0, this);
+    ptr->SetData(SET_DATA_ISOLATE_BASE, this);
 
     ptr->SetModifyCodeGenerationFromStringsCallback(&modifyCodeGenCallback);
     ptr->SetAllowWasmCodeGenerationCallback(&allowWasmCallback);
+    ptr->SetWasmJSPIEnabledCallback(&jspiEnabledCallback);
 
     // We don't support SharedArrayBuffer so Atomics.wait() doesn't make sense, and might allow DoS
     // attacks.
@@ -401,10 +402,11 @@ IsolateBase::~IsolateBase() noexcept(false) {
 }
 
 v8::Local<v8::FunctionTemplate> IsolateBase::getOpaqueTemplate(v8::Isolate* isolate) {
-  return static_cast<IsolateBase*>(isolate->GetData(0))->opaqueTemplate.Get(isolate);
+  return static_cast<IsolateBase*>(isolate->GetData(SET_DATA_ISOLATE_BASE))
+      ->opaqueTemplate.Get(isolate);
 }
 
-void IsolateBase::dropWrappers(kj::Own<void> typeWrapperInstance) {
+void IsolateBase::dropWrappers(kj::FunctionParam<void()> drop) {
   // Delete all wrappers.
   jsg::runInV8Stack([&](jsg::V8StackScope& stackScope) {
     v8::Locker lock(ptr);
@@ -424,7 +426,7 @@ void IsolateBase::dropWrappers(kj::Own<void> typeWrapperInstance) {
 
     // Make sure the TypeWrapper is destroyed under lock by declaring a new copy of the variable
     // that is destroyed before the lock is released.
-    kj::Own<void> typeWrapperInstanceInner = kj::mv(typeWrapperInstance);
+    drop();
 
     // Destroy all wrappers.
     heapTracer.clearWrappers();
@@ -449,21 +451,28 @@ void IsolateBase::oomError(const char* location, const v8::OOMDetails& oom) {
 v8::ModifyCodeGenerationFromStringsResult IsolateBase::modifyCodeGenCallback(
     v8::Local<v8::Context> context, v8::Local<v8::Value> source, bool isCodeLike) {
   v8::Isolate* isolate = context->GetIsolate();
-  IsolateBase* self = static_cast<IsolateBase*>(isolate->GetData(0));
+  IsolateBase* self = static_cast<IsolateBase*>(isolate->GetData(SET_DATA_ISOLATE_BASE));
   return {.codegen_allowed = self->evalAllowed, .modified_source = {}};
 }
 
 bool IsolateBase::allowWasmCallback(v8::Local<v8::Context> context, v8::Local<v8::String> source) {
   // Don't allow WASM unless arbitrary eval() is allowed.
-  IsolateBase* self = static_cast<IsolateBase*>(context->GetIsolate()->GetData(0));
+  IsolateBase* self =
+      static_cast<IsolateBase*>(context->GetIsolate()->GetData(SET_DATA_ISOLATE_BASE));
   return self->evalAllowed;
+}
+
+bool IsolateBase::jspiEnabledCallback(v8::Local<v8::Context> context) {
+  IsolateBase* self =
+      static_cast<IsolateBase*>(context->GetIsolate()->GetData(SET_DATA_ISOLATE_BASE));
+  return self->jspiEnabled;
 }
 
 void IsolateBase::jitCodeEvent(const v8::JitCodeEvent* event) noexcept {
   // We register this callback with V8 in order to build a mapping of code addresses to source
   // code locations, which we use when reporting stack traces during crashes.
 
-  IsolateBase* self = static_cast<IsolateBase*>(event->isolate->GetData(0));
+  IsolateBase* self = static_cast<IsolateBase*>(event->isolate->GetData(SET_DATA_ISOLATE_BASE));
   auto& codeMap = self->codeMap;
 
   // Pointer comparison between pointers not from the same array is UB so we'd better operate on
@@ -562,6 +571,21 @@ void IsolateBase::jitCodeEvent(const v8::JitCodeEvent* event) noexcept {
   }
 }
 
+void* getJsCageBase() {
+  if (!v8Initialized) return nullptr;
+  v8::Isolate* isolate = v8::Isolate::TryGetCurrent();
+  if (isolate == nullptr) return nullptr;
+  // Returns null if setJsCageBase was never called.
+  return isolate->GetData(SET_DATA_CAGE_BASE);
+}
+
+void setJsCageBase(void* cageBase) {
+  if (!v8Initialized) return;
+  v8::Isolate* isolate = v8::Isolate::TryGetCurrent();
+  if (isolate == nullptr) return;
+  isolate->SetData(SET_DATA_CAGE_BASE, cageBase);
+}
+
 #if _WIN32
 kj::Maybe<kj::StringPtr> getJsStackTrace(void* ucontext, kj::ArrayPtr<char> scratch) {
   // This function is only called by the internal build which just targets Linux.
@@ -648,7 +672,7 @@ kj::Maybe<kj::StringPtr> getJsStackTrace(void* ucontext, kj::ArrayPtr<char> scra
   }
   appendText("js: (", vmState, ")");
 
-  auto& codeMap = static_cast<IsolateBase*>(isolate->GetData(0))->codeMap;
+  auto& codeMap = static_cast<IsolateBase*>(isolate->GetData(SET_DATA_ISOLATE_BASE))->codeMap;
 
   for (auto i: kj::zeroTo(sampleInfo.frames_count)) {
     uintptr_t addr = reinterpret_cast<uintptr_t>(traceSpace[i]);

@@ -122,7 +122,7 @@ static constexpr kj::StringPtr mainModuleName = "main"_kj;
 static constexpr kj::StringPtr scriptId = "script"_kj;
 
 class MockEntropySource final: public kj::EntropySource {
-public:
+ public:
   ~MockEntropySource() {}
   void generate(kj::ArrayPtr<kj::byte> buffer) override {
     for (kj::byte& b: buffer) {
@@ -137,7 +137,7 @@ public:
     return r;
   }
 
-private:
+ private:
   kj::byte counter = 0;
 };
 
@@ -282,7 +282,7 @@ struct MockResponse final: public kj::HttpService::Response {
 };
 
 class MockActorLoopback: public Worker::Actor::Loopback, public kj::Refcounted {
-public:
+ public:
   virtual kj::Own<WorkerInterface> getWorker(IoChannelFactory::SubrequestMetadata metadata) {
     return kj::Own<WorkerInterface>();
   };
@@ -323,13 +323,16 @@ TestFixture::TestFixture(SetupParams&& params)
       memoryCacheProvider(kj::heap<api::MemoryCacheProvider>(*timer)),
       api(kj::heap<server::WorkerdApi>(testV8System,
           params.featureFlags.orDefault(CompatibilityFlags::Reader()),
-          kj::heap<MockIsolateLimitEnforcer>(),
-          kj::atomicRefcounted<IsolateObserver>(),
+          kj::heap<MockIsolateLimitEnforcer>()->getCreateParams(),
+          kj::atomicRefcounted<JsgIsolateObserver>(),
           *memoryCacheProvider,
           defaultPythonConfig,
           kj::none)),
-      workerIsolate(kj::atomicRefcounted<Worker::Isolate>(
-          kj::mv(api), scriptId, Worker::Isolate::InspectorPolicy::DISALLOW)),
+      workerIsolate(kj::atomicRefcounted<Worker::Isolate>(kj::mv(api),
+          kj::atomicRefcounted<IsolateObserver>(),
+          scriptId,
+          kj::heap<MockIsolateLimitEnforcer>(),
+          Worker::Isolate::InspectorPolicy::DISALLOW)),
       workerScript(kj::atomicRefcounted<Worker::Script>(kj::atomicAddRef(*workerIsolate),
           scriptId,
           server::WorkerdApi::extractSource(mainModuleName,
@@ -405,8 +408,10 @@ void TestFixture::runInIoContext(kj::Function<kj::Promise<void>(const Environmen
 kj::Own<IoContext::IncomingRequest> TestFixture::createIncomingRequest() {
   auto context = kj::refcounted<IoContext>(
       threadContext, kj::atomicAddRef(*worker), actor, kj::heap<MockLimitEnforcer>());
+  auto invocationSpanContext = tracing::InvocationSpanContext::newForInvocation(kj::none, kj::none);
   auto incomingRequest = kj::heap<IoContext::IncomingRequest>(kj::addRef(*context),
-      kj::heap<DummyIoChannelFactory>(*timerChannel), kj::refcounted<RequestObserver>(), nullptr);
+      kj::heap<DummyIoChannelFactory>(*timerChannel), kj::refcounted<RequestObserver>(), nullptr,
+      kj::mv(invocationSpanContext));
   incomingRequest->delivered();
   return incomingRequest;
 }
@@ -420,7 +425,7 @@ TestFixture::Response TestFixture::runRequest(
   runInIoContext([&](const TestFixture::Environment& env) {
     auto& globalScope = env.lock.getGlobalScope();
     return globalScope.request(method, url, requestHeaders, *requestBody, response, "{}"_kj,
-        env.lock, env.lock.getExportedHandler(kj::none, kj::none));
+        env.lock, env.lock.getExportedHandler(kj::none, {}, kj::none));
   });
 
   return {.statusCode = response.statusCode, .body = response.body->str()};

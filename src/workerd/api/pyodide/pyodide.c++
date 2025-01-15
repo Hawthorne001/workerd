@@ -3,6 +3,8 @@
 //     https://opensource.org/licenses/Apache-2.0
 #include "pyodide.h"
 
+#include <workerd/api/pyodide/setup-emscripten.h>
+#include <workerd/io/compatibility-date.h>
 #include <workerd/util/string-buffer.h>
 #include <workerd/util/strings.h>
 
@@ -21,6 +23,22 @@ const kj::Maybe<jsg::Bundle::Reader> PyodideBundleManager::getPyodideBundle(
       [](const MessageBundlePair& t) { return t.bundle; });
 }
 
+kj::Maybe<kj::String> PyodideBundleManager::getPyodideLock(
+    PythonSnapshotRelease::Reader pythonSnapshotRelease) const {
+  auto bundleName = getPythonBundleName(pythonSnapshotRelease);
+  // We expect the Pyodide Bundle for the specified bundle name to already be downloaded here.
+  auto maybeBundle = getPyodideBundle(bundleName);
+  auto bundle = KJ_ASSERT_NONNULL(maybeBundle);
+  for (auto module: bundle.getModules()) {
+    if (module.which() == workerd::jsg::Module::JSON &&
+        module.getName() == "pyodide-internal:generated/pyodide-lock.json") {
+      return kj::str(module.getJson());
+    }
+  }
+
+  return kj::none;
+}
+
 void PyodideBundleManager::setPyodideBundleData(
     kj::String version, kj::Array<unsigned char> data) const {
   auto wordArray = kj::arrayPtr(
@@ -35,10 +53,9 @@ void PyodideBundleManager::setPyodideBundleData(
       kj::mv(version), {.messageReader = kj::mv(messageReader), .bundle = bundle});
 }
 
-const kj::Maybe<kj::ArrayPtr<const unsigned char>> PyodidePackageManager::getPyodidePackage(
+const kj::Maybe<const kj::Array<unsigned char>&> PyodidePackageManager::getPyodidePackage(
     kj::StringPtr id) const {
-  return packages.lockShared()->find(id).map(
-      [](const kj::Array<unsigned char>& t) { return t.asPtr(); });
+  return packages.lockShared()->find(id);
 }
 
 void PyodidePackageManager::setPyodidePackageData(
@@ -60,7 +77,7 @@ static int readToTarget(
   return toCopy;
 }
 
-int PackagesTarReader::read(jsg::Lock& js, int offset, kj::Array<kj::byte> buf) {
+int ReadOnlyBuffer::read(jsg::Lock& js, int offset, kj::Array<kj::byte> buf) {
   return readToTarget(source, offset, buf);
 }
 
@@ -383,8 +400,9 @@ kj::Array<kj::StringPtr> ArtifactBundler::getSnapshotImports() {
   return result.releaseAsArray();
 }
 
-jsg::Ref<PyodideMetadataReader> makePyodideMetadataReader(
-    Worker::Reader conf, const PythonConfig& pythonConfig) {
+jsg::Ref<PyodideMetadataReader> makePyodideMetadataReader(Worker::Reader conf,
+    const PythonConfig& pythonConfig,
+    PythonSnapshotRelease::Reader pythonRelease) {
   auto modules = conf.getModules();
   auto mainModule = kj::str(modules.begin()->getName());
   int numFiles = 0;
@@ -434,14 +452,14 @@ jsg::Ref<PyodideMetadataReader> makePyodideMetadataReader(
   bool createSnapshot = pythonConfig.createSnapshot;
   bool createBaselineSnapshot = pythonConfig.createBaselineSnapshot;
   bool snapshotToDisk = createSnapshot || createBaselineSnapshot;
+
   // clang-format off
   return jsg::alloc<PyodideMetadataReader>(
     kj::mv(mainModule),
     names.finish(),
     contents.finish(),
     requirements.finish(),
-    kj::str("20240829.4"), // TODO: hardcoded version & lock
-    kj::str(PYODIDE_LOCK.toString()),
+    kj::str(pythonRelease.getPackages()),
     true      /* isWorkerd */,
     false     /* isTracing */,
     snapshotToDisk,
@@ -482,6 +500,16 @@ void DiskCache::put(jsg::Lock& js, kj::String key, kj::Array<kj::byte> data) {
   } else {
     return;
   }
+}
+
+jsg::JsValue SetupEmscripten::getModule(jsg::Lock& js) {
+  js.installJspi();
+  js.v8Context()->SetSecurityToken(emscriptenRuntime.contextToken.getHandle(js));
+  return emscriptenRuntime.emscriptenRuntime.getHandle(js);
+}
+
+void SetupEmscripten::visitForGc(jsg::GcVisitor& visitor) {
+  visitor.visit(const_cast<EmscriptenRuntime&>(emscriptenRuntime).emscriptenRuntime);
 }
 
 bool hasPythonModules(capnp::List<server::config::Worker::Module>::Reader modules) {
