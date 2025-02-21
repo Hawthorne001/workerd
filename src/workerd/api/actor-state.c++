@@ -230,6 +230,26 @@ kj::Maybe<kj::String> getCurrentActorId() {
 
 }  // namespace
 
+DurableObjectStorage::DurableObjectStorage(IoPtr<ActorCacheInterface> cache,
+    bool enableSql,
+    kj::Own<IoChannelFactory::ActorChannel> primaryActorChannel,
+    kj::Own<ActorIdFactory::ActorId> primaryActorId)
+    : cache(kj::mv(cache)),
+      enableSql(enableSql) {
+
+  auto replicaFactory = kj::heap<ReplicaActorOutgoingFactory>(
+      kj::mv(primaryActorChannel), primaryActorId->toString());
+  auto outgoingFactory =
+      IoContext::current().addObject<Fetcher::OutgoingFactory>(kj::mv(replicaFactory));
+  auto requiresHost = FeatureFlags::get(IoContext::current().getCurrentLock())
+                          .getDurableObjectFetchRequiresSchemeAuthority()
+      ? Fetcher::RequiresHostAndProtocol::YES
+      : Fetcher::RequiresHostAndProtocol::NO;
+
+  this->maybePrimary = jsg::alloc<DurableObject>(
+      jsg::alloc<DurableObjectId>(kj::mv(primaryActorId)), kj::mv(outgoingFactory), requiresHost);
+}
+
 jsg::Promise<jsg::JsRef<jsg::JsValue>> DurableObjectStorageOperations::get(jsg::Lock& js,
     kj::OneOf<kj::String, kj::Array<kj::String>> keys,
     jsg::Optional<GetOptions> maybeOptions) {
@@ -743,6 +763,13 @@ void DurableObjectStorage::ensureReplicas() {
   return cache->ensureReplicas();
 }
 
+jsg::Optional<jsg::Ref<DurableObject>> DurableObjectStorage::getPrimary(jsg::Lock& js) {
+  KJ_IF_SOME(primary, maybePrimary) {
+    return primary.addRef();
+  }
+  return kj::none;
+}
+
 ActorCacheOps& DurableObjectTransaction::getCache(OpName op) {
   JSG_REQUIRE(!rolledBack, Error, kj::str("Cannot ", op, " on rolled back transaction"));
   auto& result = *JSG_REQUIRE_NONNULL(cacheTxn, Error,
@@ -798,10 +825,17 @@ kj::OneOf<jsg::Ref<DurableObjectId>, kj::StringPtr> ActorState::getId() {
   KJ_UNREACHABLE;
 }
 
-DurableObjectState::DurableObjectState(
-    Worker::Actor::Id actorId, kj::Maybe<jsg::Ref<DurableObjectStorage>> storage)
+DurableObjectState::DurableObjectState(Worker::Actor::Id actorId,
+    jsg::JsRef<jsg::JsValue> exports,
+    kj::Maybe<jsg::Ref<DurableObjectStorage>> storage,
+    kj::Maybe<rpc::Container::Client> container,
+    bool containerRunning)
     : id(kj::mv(actorId)),
-      storage(kj::mv(storage)) {}
+      exports(kj::mv(exports)),
+      storage(kj::mv(storage)),
+      container(container.map([&](rpc::Container::Client& cap) {
+        return jsg::alloc<Container>(kj::mv(cap), containerRunning);
+      })) {}
 
 void DurableObjectState::waitUntil(kj::Promise<void> promise) {
   IoContext::current().addWaitUntil(kj::mv(promise));

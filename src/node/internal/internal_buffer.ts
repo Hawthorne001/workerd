@@ -7,7 +7,7 @@
 // Copyright Joyent and Node contributors. All rights reserved. MIT license.
 // Copyright Feross Aboukhadijeh, and other contributors. All rights reserved. MIT license.
 
-/* todo: the following is adopted code, enabling linting one day */
+/* TODO: the following is adopted code, enabling linting one day */
 /* eslint-disable */
 
 import {
@@ -28,7 +28,10 @@ import {
   isUint8Array,
 } from 'node-internal:internal_types';
 
-import { normalizeEncoding } from 'node-internal:internal_utils';
+import {
+  normalizeEncoding,
+  getEncodingOps,
+} from 'node-internal:internal_utils';
 
 import { validateString } from 'node-internal:validators';
 
@@ -52,7 +55,7 @@ float32Array[0] = -1; // 0xBF800000
 // check this with `os.endianness()` because that is determined at compile time.
 export const bigEndian = uInt8Float32Array[3] === 0;
 
-// Node.js caps it's max length at uint32_t max, we are very intentionally more
+// Node.js caps its max length at uint32_t max, we are very intentionally more
 // conservative here, capping at int32_t max.
 export const kMaxLength = 2147483647;
 export const kStringMaxLength = 536870888;
@@ -648,7 +651,7 @@ Buffer.prototype.toString = function toString(
     return '';
   }
 
-  const normalizedEncoding = normalizeEncoding(`${encoding}`);
+  const normalizedEncoding = getEncodingOps(encoding);
   if (normalizedEncoding === undefined) {
     throw new ERR_UNKNOWN_ENCODING(`${encoding}`);
   }

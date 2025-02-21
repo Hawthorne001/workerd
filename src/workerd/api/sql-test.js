@@ -406,6 +406,23 @@ async function test(state) {
   // But that private tables are again restricted
   assert.throws(() => sql.exec('PRAGMA quick_check(_cf_KV)'), /not authorized/);
 
+  // PRAGMA optimize and ANALYZE are allowed.
+  //
+  // The following sequence of calls is mentioned by https://www.sqlite.org/lang_analyze.html as how
+  // one might optmize the query planner.
+  {
+    let info = [...sql.exec('PRAGMA optimize=0x10002;')];
+    assert.equal(info.length, 0);
+  }
+  {
+    let info = [...sql.exec('ANALYZE;')];
+    assert.equal(info.length, 0);
+  }
+  {
+    let info = [...sql.exec('PRAGMA optimize;')];
+    assert.equal(info.length, 0);
+  }
+
   // Basic functions like abs() work.
   assert.equal([...sql.exec('SELECT abs(-123)').raw()][0][0], 123);
 
@@ -617,16 +634,16 @@ async function test(state) {
         )
       )[0].data
     );
-    assert.equal(jsonResult.length, 11);
+    assert.equal(jsonResult.length, 12);
     assert.equal(
       jsonResult.map((r) => r.name).join(','),
-      'myTable,documents,documents_fts,documents_fts_data,documents_fts_idx,documents_fts_content,documents_fts_docsize,documents_fts_config,documents_fts_v_col,documents_fts_v_row,documents_fts_v_instance'
+      'myTable,sqlite_stat1,documents,documents_fts,documents_fts_data,documents_fts_idx,documents_fts_content,documents_fts_docsize,documents_fts_config,documents_fts_v_col,documents_fts_v_row,documents_fts_v_instance'
     );
     assert.equal(jsonResult[0].columns.foo, 'TEXT');
     assert.equal(jsonResult[0].columns.bar, 'INTEGER');
-    assert.equal(jsonResult[1].columns.id, 'INTEGER');
-    assert.equal(jsonResult[1].columns.title, 'TEXT');
-    assert.equal(jsonResult[1].columns.content, 'TEXT');
+    assert.equal(jsonResult[2].columns.id, 'INTEGER');
+    assert.equal(jsonResult[2].columns.title, 'TEXT');
+    assert.equal(jsonResult[2].columns.content, 'TEXT');
   }
 
   let assertValidBool = (name, val) => {
@@ -670,11 +687,11 @@ async function test(state) {
   assertInvalidBool("'yes", 'unrecognized token');
 
   // Test database size interface.
-  assert.equal(sql.databaseSize, 36864);
+  assert.equal(sql.databaseSize, 40960);
   sql.exec(`CREATE TABLE should_make_one_more_page(VALUE text);`);
-  assert.equal(sql.databaseSize, 36864 + 4096);
+  assert.equal(sql.databaseSize, 40960 + 4096);
   sql.exec(`DROP TABLE should_make_one_more_page;`);
-  assert.equal(sql.databaseSize, 36864);
+  assert.equal(sql.databaseSize, 40960);
 
   storage.put('txnTest', 0);
 
@@ -711,7 +728,7 @@ async function test(state) {
       assert.equal(await storage.get('txnTest'), 5);
       throw new Error('txn failure');
     });
-    throw new Error('expected errror');
+    throw new Error('expected error');
   } catch (err) {
     assert.equal(err.message, 'txn failure');
   }
@@ -1026,7 +1043,7 @@ async function test(state) {
     assert.equal(true, isCached('SELECT 179321'));
     assert.equal(true, isCached('SELECT 179321'));
 
-    // Qeury based on computed string is cached.
+    // Query based on computed string is cached.
     assert.equal(false, isCached('SELECT "' + 'x'.repeat(4) + '"'));
     assert.equal(true, isCached('SELECT "' + 'x'.repeat(4) + '"'));
     assert.equal(true, isCached('SELECT "' + 'x'.repeat(4) + '"'));
@@ -1350,7 +1367,7 @@ export class DurableObjectExample extends DurableObject {
     // effect, but this is the one that we observed causing issues.)
     //
     // In particular, the prepared statement ActorSqlite::beginTxn, which is simply
-    // `BEGIN TRANSACTION`, will be invalidated and recomplied on the next invocation.
+    // `BEGIN TRANSACTION`, will be invalidated and recompiled on the next invocation.
     //
     // When we perform our multi-statement exec below, the first line will invoke the
     // `ActorSqlite::onWrite` callback, which will invoke `beginTxn`. Because `BEGIN TRANSACTION`
@@ -1376,6 +1393,17 @@ export class DurableObjectExample extends DurableObject {
     `);
 
     assert.deepEqual([...cursor], [{ i: 123 }]);
+  }
+
+  async testSessionsAPIBookmark(previousBookmark) {
+    if (previousBookmark) {
+      await this.state.storage.waitForBookmark(previousBookmark);
+    }
+    let bookmark = await this.state.storage.getCurrentBookmark();
+    if (previousBookmark) {
+      assert.ok(previousBookmark < bookmark, "new bookmark didn't advance!");
+    }
+    return bookmark;
   }
 }
 
@@ -1478,3 +1506,13 @@ const INSERT_36_ROWS = ['a', 'b', 'c', 'd', 'e', 'f']
         .join(',')};`
   )
   .join(' ');
+
+export let testSessionsAPIBookmark = {
+  async test(ctrl, env, ctx) {
+    let stub = env.ns.get(env.ns.idFromName('sessions-api-bookmark-test'));
+    let bookmark = undefined;
+    for (let i = 0; i < 20; ++i) {
+      bookmark = await stub.testSessionsAPIBookmark(bookmark);
+    }
+  },
+};

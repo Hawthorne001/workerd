@@ -12,10 +12,10 @@
 namespace workerd::api::node {
 
 class CryptoImpl final: public jsg::Object {
-public:
+ public:
   // DH
   class DiffieHellmanHandle final: public jsg::Object {
-  public:
+   public:
     DiffieHellmanHandle(DiffieHellman dh);
 
     static jsg::Ref<DiffieHellmanHandle> constructor(jsg::Lock& js,
@@ -44,12 +44,15 @@ public:
       JSG_METHOD(getVerifyError);
     };
 
-  private:
+   private:
     DiffieHellman dh;
     int verifyError;
   };
 
   jsg::Ref<DiffieHellmanHandle> DiffieHellmanGroupHandle(kj::String name);
+
+  jsg::BufferSource statelessDH(
+      jsg::Lock& js, jsg::Ref<CryptoKey> privateKey, jsg::Ref<CryptoKey> publicKey);
 
   // Primes
   jsg::BufferSource randomPrime(jsg::Lock& js,
@@ -61,7 +64,7 @@ public:
 
   // Hash
   class HashHandle final: public jsg::Object {
-  public:
+   public:
     HashHandle(HashContext ctx): ctx(kj::mv(ctx)) {}
 
     static jsg::Ref<HashHandle> constructor(kj::String algorithm, kj::Maybe<uint32_t> xofLen);
@@ -81,20 +84,20 @@ public:
 
     void visitForMemoryInfo(jsg::MemoryTracker& tracker) const;
 
-  private:
+   private:
     HashContext ctx;
   };
 
   // Hmac
   class HmacHandle final: public jsg::Object {
-  public:
+   public:
     using KeyParam = kj::OneOf<kj::Array<kj::byte>, jsg::Ref<CryptoKey>>;
 
     HmacHandle(HmacContext ctx): ctx(kj::mv(ctx)) {};
 
-    static jsg::Ref<HmacHandle> constructor(kj::String algorithm, KeyParam key);
+    static jsg::Ref<HmacHandle> constructor(jsg::Lock& js, kj::String algorithm, KeyParam key);
 
-    // Efficiently implement one-shot hmac that avoids multiple calls
+    // Efficiently implement one-shot HMAC that avoids multiple calls
     // across the C++/JS boundary.
     static jsg::BufferSource oneshot(
         jsg::Lock& js, kj::String algorithm, KeyParam key, kj::Array<kj::byte> data);
@@ -110,19 +113,20 @@ public:
 
     void visitForMemoryInfo(jsg::MemoryTracker& tracker) const;
 
-  private:
+   private:
     HmacContext ctx;
   };
 
   // Hkdf
-  kj::Array<kj::byte> getHkdf(kj::String hash,
+  jsg::BufferSource getHkdf(jsg::Lock& js,
+      kj::String hash,
       kj::Array<const kj::byte> key,
       kj::Array<const kj::byte> salt,
       kj::Array<const kj::byte> info,
       uint32_t length);
 
   // Pbkdf2
-  kj::Array<kj::byte> getPbkdf(jsg::Lock& js,
+  jsg::BufferSource getPbkdf(jsg::Lock& js,
       kj::Array<const kj::byte> password,
       kj::Array<const kj::byte> salt,
       uint32_t num_iterations,
@@ -130,7 +134,7 @@ public:
       kj::String name);
 
   // Scrypt
-  kj::Array<kj::byte> getScrypt(jsg::Lock& js,
+  jsg::BufferSource getScrypt(jsg::Lock& js,
       kj::Array<const kj::byte> password,
       kj::Array<const kj::byte> salt,
       uint32_t N,
@@ -181,13 +185,10 @@ public:
   };
 
   struct CreateAsymmetricKeyOptions {
-    kj::OneOf<kj::Array<kj::byte>, SubtleCrypto::JsonWebKey, jsg::Ref<CryptoKey>> key;
-    // For a PrivateKey, the key is one of either kj::Array<kj::byte> or
-    // SubtleCrypto::JsonWebKey. For a PublicKey it can also be a CryptoKey
-    // containing a private key from which the public key will be derived.
-    jsg::Optional<kj::String> format;
+    kj::OneOf<jsg::BufferSource, SubtleCrypto::JsonWebKey, jsg::Ref<api::CryptoKey>> key;
+    kj::String format;
     jsg::Optional<kj::String> type;
-    jsg::Optional<kj::Array<kj::byte>> passphrase;
+    jsg::Optional<jsg::BufferSource> passphrase;
     // The passphrase is only used for private keys. The format, type, and passphrase
     // options are only used if the key is a kj::Array<kj::byte>.
     JSG_STRUCT(key, format, type, passphrase);
@@ -196,7 +197,7 @@ public:
   CryptoImpl() = default;
   CryptoImpl(jsg::Lock&, const jsg::Url&) {}
 
-  kj::OneOf<kj::String, kj::Array<kj::byte>, SubtleCrypto::JsonWebKey> exportKey(
+  kj::OneOf<kj::String, jsg::BufferSource, SubtleCrypto::JsonWebKey> exportKey(
       jsg::Lock& js, jsg::Ref<CryptoKey> key, jsg::Optional<KeyExportOptions> options);
 
   bool equals(jsg::Lock& js, jsg::Ref<CryptoKey> key, jsg::Ref<CryptoKey> otherKey);
@@ -204,9 +205,48 @@ public:
   CryptoKey::AsymmetricKeyDetails getAsymmetricKeyDetail(jsg::Lock& js, jsg::Ref<CryptoKey> key);
   kj::StringPtr getAsymmetricKeyType(jsg::Lock& js, jsg::Ref<CryptoKey> key);
 
-  jsg::Ref<CryptoKey> createSecretKey(jsg::Lock& js, kj::Array<kj::byte>);
+  jsg::Ref<CryptoKey> createSecretKey(jsg::Lock& js, jsg::BufferSource keyData);
   jsg::Ref<CryptoKey> createPrivateKey(jsg::Lock& js, CreateAsymmetricKeyOptions options);
   jsg::Ref<CryptoKey> createPublicKey(jsg::Lock& js, CreateAsymmetricKeyOptions options);
+
+  struct RsaKeyPairOptions {
+    kj::String type;
+    uint32_t modulusLength;
+    uint32_t publicExponent;
+    jsg::Optional<uint32_t> saltLength;
+    jsg::Optional<kj::String> hashAlgorithm;
+    jsg::Optional<kj::String> mgf1HashAlgorithm;
+    JSG_STRUCT(type, modulusLength, publicExponent, saltLength, hashAlgorithm, mgf1HashAlgorithm);
+  };
+
+  struct DsaKeyPairOptions {
+    uint32_t modulusLength;
+    jsg::Optional<uint32_t> divisorLength;
+    JSG_STRUCT(modulusLength, divisorLength);
+  };
+
+  struct EcKeyPairOptions {
+    kj::String namedCurve;
+    kj::String paramEncoding;
+    JSG_STRUCT(namedCurve, paramEncoding);
+  };
+
+  struct EdKeyPairOptions {
+    kj::String type;
+    JSG_STRUCT(type);
+  };
+
+  struct DhKeyPairOptions {
+    kj::OneOf<jsg::BufferSource, uint32_t, kj::String> primeOrGroup;
+    jsg::Optional<uint32_t> generator;
+    JSG_STRUCT(primeOrGroup, generator);
+  };
+
+  CryptoKeyPair generateRsaKeyPair(RsaKeyPairOptions options);
+  CryptoKeyPair generateDsaKeyPair(DsaKeyPairOptions options);
+  CryptoKeyPair generateEcKeyPair(EcKeyPairOptions options);
+  CryptoKeyPair generateEdKeyPair(EdKeyPairOptions options);
+  CryptoKeyPair generateDhKeyPair(DhKeyPairOptions options);
 
   bool verifySpkac(kj::Array<const kj::byte> input);
   kj::Maybe<jsg::BufferSource> exportPublicKey(jsg::Lock& js, kj::Array<const kj::byte> input);
@@ -216,6 +256,7 @@ public:
     // DH
     JSG_NESTED_TYPE(DiffieHellmanHandle);
     JSG_METHOD(DiffieHellmanGroupHandle);
+    JSG_METHOD(statelessDH);
     // Primes
     JSG_METHOD(randomPrime);
     JSG_METHOD(checkPrimeSync);
@@ -242,6 +283,12 @@ public:
     JSG_METHOD(exportChallenge);
     // X509
     JSG_NESTED_TYPE(X509Certificate);
+    // Key generation
+    JSG_METHOD(generateRsaKeyPair);
+    JSG_METHOD(generateDsaKeyPair);
+    JSG_METHOD(generateEcKeyPair);
+    JSG_METHOD(generateEdKeyPair);
+    JSG_METHOD(generateDhKeyPair);
   }
 };
 
@@ -249,5 +296,8 @@ public:
   api::node::CryptoImpl, api::node::CryptoImpl::DiffieHellmanHandle,                               \
       api::node::CryptoImpl::HashHandle, api::node::CryptoImpl::HmacHandle,                        \
       api::node::CryptoImpl::KeyExportOptions, api::node::CryptoImpl::GenerateKeyPairOptions,      \
-      api::node::CryptoImpl::CreateAsymmetricKeyOptions, EW_CRYPTO_X509_ISOLATE_TYPES
+      api::node::CryptoImpl::CreateAsymmetricKeyOptions, api::node::CryptoImpl::RsaKeyPairOptions, \
+      api::node::CryptoImpl::DsaKeyPairOptions, api::node::CryptoImpl::EcKeyPairOptions,           \
+      api::node::CryptoImpl::EdKeyPairOptions, api::node::CryptoImpl::DhKeyPairOptions,            \
+      EW_CRYPTO_X509_ISOLATE_TYPES
 }  // namespace workerd::api::node

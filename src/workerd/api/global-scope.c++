@@ -15,6 +15,7 @@
 #include <workerd/api/system-streams.h>
 #include <workerd/api/trace.h>
 #include <workerd/api/util.h>
+#include <workerd/io/compatibility-date.h>
 #include <workerd/io/features.h>
 #include <workerd/io/io-context.h>
 #include <workerd/jsg/async-context.h>
@@ -121,7 +122,7 @@ kj::Promise<DeferredProxy<void>> ServiceWorkerGlobalScope::request(kj::HttpMetho
     kj::Maybe<ExportedHandler&> exportedHandler) {
   TRACE_EVENT("workerd", "ServiceWorkerGlobalScope::request()");
   // To construct a ReadableStream object, we're supposed to pass in an Own<AsyncInputStream>, so
-  // that it can drop the reference whenever it gets GC'd. But in this case the stream's lifetime
+  // that it can drop the reference whenever it gets GC'ed. But in this case the stream's lifetime
   // is not under our control -- it's attached to the request. So, we wrap it in a
   // NeuterableInputStream which allows us to disconnect the stream before it becomes invalid.
   auto ownRequestBody = newNeuterableInputStream(requestBody);
@@ -471,16 +472,17 @@ kj::Promise<WorkerInterface::AlarmResult> ServiceWorkerGlobalScope::runAlarm(kj:
             !jsg::isDoNotLogException(desc) && context.isOutputGateBroken()) {
           LOG_NOSENTRY(ERROR, "output lock broke during alarm execution", actorId, e);
         } else if (context.isOutputGateBroken()) {
-          // We don't usually log these messages, but it's useful to know the real reason we failed
-          // to correctly investigate stuck alarms.
-          LOG_NOSENTRY(ERROR,
-              "output lock broke during alarm execution without an interesting error description",
-              actorId, e);
           if (e.getDetail(jsg::EXCEPTION_IS_USER_ERROR) != kj::none) {
             // The handler failed because the user overloaded the object. It's their fault, we'll not
             // retry forever.
             shouldRetryCountsAgainstLimits = true;
           }
+
+          // We don't usually log these messages, but it's useful to know the real reason we failed
+          // to correctly investigate stuck alarms.
+          LOG_NOSENTRY(ERROR,
+              "output lock broke during alarm execution without an interesting error description",
+              actorId, e, shouldRetryCountsAgainstLimits);
         }
         return WorkerInterface::AlarmResult{.retry = true,
           .retryCountsAgainstLimit = shouldRetryCountsAgainstLimits,
@@ -511,11 +513,6 @@ kj::Promise<WorkerInterface::AlarmResult> ServiceWorkerGlobalScope::runAlarm(kj:
               LOG_NOSENTRY(ERROR, "output lock broke after executing alarm", actorId, e);
             }
           } else {
-            // We don't usually log these messages, but it's useful to know the real reason we failed
-            // to correctly investigate stuck alarms.
-            LOG_NOSENTRY(ERROR,
-                "output lock broke after executing alarm without an interesting error description",
-                actorId, e);
             if (e.getDetail(jsg::EXCEPTION_IS_USER_ERROR) != kj::none) {
               // The handler failed because the user overloaded the object. It's their fault, we'll not
               // retry forever.
@@ -715,7 +712,7 @@ void ServiceWorkerGlobalScope::queueMicrotask(jsg::Lock& js, v8::Local<v8::Funct
                 // catch or handle this error so logging is really the only way to notify
                 // folks about it.
                 auto val = jsg::JsValue(exception.getHandle(js));
-                // If the value is an object that has a stack propery, log that so we get
+                // If the value is an object that has a stack property, log that so we get
                 // the stack trace if it is an exception.
                 KJ_IF_SOME(obj, val.tryCast<jsg::JsObject>()) {
                 auto stack = obj.get(js, "stack"_kj);
@@ -819,7 +816,7 @@ void ServiceWorkerGlobalScope::reportError(jsg::Lock& js, jsg::JsValue error) {
         .colno = jsg::check(message->GetStartColumn(js.v8Context())),
         .error = jsg::JsRef(js, error)});
   if (dispatchEventImpl(js, kj::mv(event))) {
-    // If the value is an object that has a stack propery, log that so we get
+    // If the value is an object that has a stack property, log that so we get
     // the stack trace if it is an exception.
     KJ_IF_SOME(obj, error.tryCast<jsg::JsObject>()) {
       auto stack = obj.get(js, "stack"_kj);
@@ -877,22 +874,25 @@ jsg::JsValue ServiceWorkerGlobalScope::getProcess(jsg::Lock& js) {
 }
 
 double Performance::now() {
-  // We define performance.now() for compatibility purposes, but due to spectre concerns it
+  // We define performance.now() for compatibility purposes, but due to Spectre concerns it
   // returns exactly what Date.now() returns.
   return dateNow();
 }
 
 #ifdef WORKERD_EXPERIMENTAL_ENABLE_WEBGPU
-jsg::Ref<api::gpu::GPU> Navigator::getGPU(CompatibilityFlags::Reader flags) {
+jsg::Optional<jsg::Ref<api::gpu::GPU>> Navigator::getGPU(CompatibilityFlags::Reader flags) {
   // is this a durable object?
   KJ_IF_SOME(actor, IoContext::current().getActor()) {
-    JSG_REQUIRE(actor.getPersistent() != kj::none, TypeError,
-        "webgpu api is only available in Durable Objects (no storage)");
+    if (actor.getPersistent() == kj::none) {
+      return kj::none;
+    }
   } else {
-    JSG_FAIL_REQUIRE(TypeError, "webgpu api is only available in Durable Objects");
+    return kj::none;
   };
 
-  JSG_REQUIRE(flags.getWebgpu(), TypeError, "webgpu needs the webgpu compatibility flag set");
+  if (!flags.getWebgpu()) {
+    return kj::none;
+  }
 
   return jsg::alloc<api::gpu::GPU>();
 }
@@ -942,7 +942,7 @@ jsg::Ref<Immediate> ServiceWorkerGlobalScope::setImmediate(jsg::Lock& js,
   // only be somewhat pathological edge cases that could be affected
   // by the differences. Unfortunately, changing this later to match
   // Node.js would likely be a breaking change for some users that
-  // would require a compat flag... but that's ok for now?
+  // would require a compat flag... but that's OK for now?
 
   auto& context = IoContext::current();
   auto fn = [function = kj::mv(function), args = kj::mv(args),

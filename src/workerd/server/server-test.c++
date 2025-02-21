@@ -28,7 +28,7 @@ jsg::V8System v8System;
 // This can only be created once per process, so we have to put it at the top level.
 
 const bool verboseLog = ([]() {
-  // TODO(beta): Improve uncaught exception reporting so that we dontt have to do this.
+  // TODO(beta): Improve uncaught exception reporting so that we don't have to do this.
   kj::_::Debug::setLogLevel(kj::LogSeverity::INFO);
   return true;
 })();
@@ -51,7 +51,7 @@ kj::Own<config::Config::Reader> parseConfig(kj::StringPtr text, kj::SourceLocati
 // This is intended to allow multi-line raw text to be specified conveniently using C++11
 // `R"(blah)"` literal syntax, without the need to mess up indentation relative to the
 // surrounding code.
-kj::String operator"" _blockquote(const char* str, size_t n) {
+kj::String operator""_blockquote(const char* str, size_t n) {
   kj::StringPtr text(str, n);
 
   // Ignore a leading newline so that `R"(` can be placed on the line before the initial indent.
@@ -87,7 +87,7 @@ kj::String operator"" _blockquote(const char* str, size_t n) {
 }
 
 class TestStream {
-public:
+ public:
   TestStream(kj::WaitScope& ws, kj::Own<kj::AsyncIoStream> stream)
       : ws(ws),
         stream(kj::mv(stream)) {}
@@ -202,7 +202,7 @@ public:
         {});
   }
 
-private:
+ private:
   kj::WaitScope& ws;
   kj::Own<kj::AsyncIoStream> stream;
 
@@ -308,7 +308,7 @@ private:
 };
 
 class TestServer final: private kj::Filesystem, private kj::EntropySource, private kj::Clock {
-public:
+ public:
   TestServer(kj::StringPtr configText, kj::SourceLocation loc = {})
       : ws(loop),
         config(parseConfig(configText, loc)),
@@ -425,7 +425,7 @@ public:
 
   kj::Date fakeDate;
 
-private:
+ private:
   kj::UnwindDetector unwindDetector;
 
   // ---------------------------------------------------------------------------
@@ -476,7 +476,7 @@ private:
   }
 
   class MockAddress final: public kj::NetworkAddress {
-  public:
+   public:
     MockAddress(TestServer& test, kj::StringPtr peerFilter, kj::String address)
         : test(test),
           peerFilter(peerFilter),
@@ -510,14 +510,14 @@ private:
       KJ_UNIMPLEMENTED("unused");
     }
 
-  private:
+   private:
     TestServer& test;
     kj::StringPtr peerFilter;
     kj::String address;
   };
 
   class MockNetwork final: public kj::Network {
-  public:
+   public:
     MockNetwork(TestServer& test,
         kj::ArrayPtr<const kj::StringPtr> allow,
         kj::ArrayPtr<const kj::StringPtr> deny)
@@ -537,7 +537,7 @@ private:
       return kj::heap<MockNetwork>(test, allow, deny);
     }
 
-  private:
+   private:
     TestServer& test;
     kj::String filter;
   };
@@ -1441,6 +1441,271 @@ KJ_TEST("Server: invalid entrypoint") {
       "has no such named entrypoint.\n");
 }
 
+KJ_TEST("Server: referencing non-extant default entrypoint is not an error") {
+  // For historical reasons, it's not a config error to refer to to the default entrypoint of
+  // a service that has no default export.
+  TestServer test(R"((
+    services = [
+      ( name = "hello",
+        worker = (
+          compatibilityDate = "2022-08-17",
+          modules = [
+            ( name = "main.js",
+              esModule =
+                `export let alt = {
+                `  async fetch(request, env) {
+                `    return new Response("OK");
+                `  }
+                `}
+            )
+          ],
+        )
+      ),
+    ],
+    sockets = [
+      ( name = "main", address = "test-addr", service = "hello" ),
+    ]
+  ))"_kj);
+  test.start();
+
+  // A request will still fail at runtime, but we shouldn't have seen startup/config errors.
+  auto conn = test.connect("test-addr");
+  conn.sendHttpGet("/");
+
+  // Due to the Deep Magic (bugs) going back to the dawn of Module Workers, if an HTTP request is
+  // delivered to the default entrypoint of a module worker that has no default export, then the
+  // system will fall back to calling event handlers registered with addEventListener("fetch").
+  //
+  // There is a magic deeper still in which, due to mistakes introduced in the stillness and the
+  // darkness before Module Workers dawned, if none of those event listeners call
+  // `event.respondWith()` (perhaps because *there are no event listeners*), then the request falls
+  // back to default handling, in which it simply passes through to fetch() and makes a subrequest.
+  //
+  // So... we expect... a subrequest...
+  {
+    auto subreq = test.receiveSubrequest("foo", {"public"});
+    subreq.recv(R"(
+      GET / HTTP/1.1
+      Host: foo
+
+    )"_blockquote);
+    subreq.send(R"(
+      HTTP/1.1 200 OK
+      Content-Length: 3
+
+      wat)"_blockquote);
+  }
+
+  conn.recv(R"(
+    HTTP/1.1 200 OK
+    Content-Length: 3
+
+    wat)"_blockquote);
+}
+
+KJ_TEST("Server: referencing DO class as entrypoint is not an error") {
+  // For historical reasons, it's not a config error to refer to an actor class as a stateless
+  // entrypoint.
+  TestServer test(R"((
+    services = [
+      ( name = "hello",
+        worker = (
+          compatibilityDate = "2022-08-17",
+          modules = [
+            ( name = "main.js",
+              esModule =
+                `import { DurableObject } from "cloudflare:workers"
+                `
+                `export class SomeActor extends DurableObject {}
+                `
+                `export default {
+                `  async fetch(request, env) {
+                `    return new Response("OK");
+                `  }
+                `}
+            )
+          ],
+        )
+      ),
+    ],
+    sockets = [
+      ( name = "main",
+        address = "test-addr",
+        service = (name = "hello", entrypoint = "SomeActor")
+      ),
+    ]
+  ))"_kj);
+
+  // We see a log warning at config time, but config otherwise completes successfully.
+  {
+    // TODO(soon): Restore this warning once miniflare no longer generates config that causes
+    //   it to log spuriously.
+    //
+    // KJ_EXPECT_LOG(WARNING,
+    //     "A ServiceDesignator in the config referenced the entrypoint \"SomeActor\", but this "
+    //     "class does not extend 'WorkerEntrypoint'. Attempts to call this entrypoint will "
+    //     "fail at runtime, but historically this was not a startup-time error. Future "
+    //     "versions of workerd may make this a startup-time error.");
+    test.start();
+  }
+
+  // However, a request will still fail at runtime.
+  KJ_EXPECT_LOG(ERROR, "worker is not an actor but class name was requested");
+  KJ_EXPECT_LOG(INFO, "Unable to get exported handler");
+  KJ_EXPECT_LOG(ERROR, "Unable to get exported handler");
+
+  auto conn = test.connect("test-addr");
+  conn.sendHttpGet("/");
+  conn.recv(R"(
+    HTTP/1.1 500 Internal Server Error
+    Connection: close
+    Content-Length: 21
+
+    Internal Server Error)"_blockquote);
+}
+
+KJ_TEST("Server: exporting a DO class as the default export is not an error") {
+  // For historical reasons, it's not a config error to export a DO class as the default
+  // entrypoint. It doesn't work at runtime, but it's not a config error.
+  TestServer test(R"((
+    services = [
+      ( name = "hello",
+        worker = (
+          compatibilityDate = "2022-08-17",
+          modules = [
+            ( name = "main.js",
+              esModule =
+                `import { DurableObject } from "cloudflare:workers"
+                `
+                `export default class extends DurableObject {
+                `  async fetch(request) {
+                `    return new Response("this should not be called");
+                `  }
+                `}
+            )
+          ],
+        )
+      ),
+    ],
+    sockets = [
+      ( name = "main",
+        address = "test-addr",
+        service = "hello"
+      ),
+    ]
+  ))"_kj);
+
+  // We see a log error at config time, but config otherwise completes successfully.
+  {
+    KJ_EXPECT_LOG(ERROR,
+        "Exported actor class as default entrypoint. This doesn't work, but historically "
+        "did not produce a startup-time error.");
+    test.start();
+  }
+
+  // Note that there is no way to actually configure the default export as a DO class since
+  // `className` is non-optional in both `DurableObjectNamespace` and
+  // `DurableObjectNamespaceDesignator`.
+  //
+  // We can, however, try to send a stateless request to the default entrypoint and see what
+  // happens!
+  //
+  // Since the runtime does not believe there is any (stateless) entrypoint exported as the
+  // default entrypoint, if you try to send a request to it, it behaves the same as if there were
+  // no `export default` at all.
+  //
+  // The behavior of this is quite strange. See the comment in the earlier test:
+  //
+  //   KJ_TEST("Server: referencing non-extant default entrypoint is not an error")
+  auto conn = test.connect("test-addr");
+  conn.sendHttpGet("/");
+
+  {
+    auto subreq = test.receiveSubrequest("foo", {"public"});
+    subreq.recv(R"(
+      GET / HTTP/1.1
+      Host: foo
+
+    )"_blockquote);
+    subreq.send(R"(
+      HTTP/1.1 200 OK
+      Content-Length: 3
+
+      wat)"_blockquote);
+  }
+
+  conn.recv(R"(
+    HTTP/1.1 200 OK
+    Content-Length: 3
+
+    wat)"_blockquote);
+}
+
+KJ_TEST("Server: configuring a DO namespace with no class export is not an error") {
+  // For historical reasons, it's not a config error to configure a DO namespace when there is
+  // no corresponding class export.
+  TestServer test(R"((
+    services = [
+      ( name = "hello",
+        worker = (
+          compatibilityDate = "2022-08-17",
+          modules = [
+            ( name = "main.js",
+              esModule =
+                `export default {
+                `  async fetch(request, env) {
+                `    return env.ns.get(env.ns.newUniqueId()).fetch(request);
+                `    //return new Response("OK");
+                `  }
+                `}
+            )
+          ],
+          bindings = [(name = "ns", durableObjectNamespace = "MyActorClass")],
+          durableObjectNamespaces = [
+            ( className = "MyActorClass",
+              uniqueKey = "mykey",
+            )
+          ],
+          durableObjectStorage = (inMemory = void)
+        )
+      ),
+    ],
+    sockets = [
+      ( name = "main",
+        address = "test-addr",
+        service = "hello"
+      ),
+    ]
+  ))"_kj);
+
+  // We see a log warning at config time, but config otherwise completes successfully.
+  {
+    KJ_EXPECT_LOG(WARNING,
+        "A DurableObjectNamespace in the config referenced the class \"MyActorClass\", but "
+        "no such Durable Object class is exported from the worker. Please make sure the "
+        "class name matches, it is exported, and the class extends 'DurableObject'. "
+        "Attempts to call to this Durable Object class will fail at runtime, but historically "
+        "this was not a startup-time error. Future versions of workerd may make this a "
+        "startup-time error.");
+    test.start();
+  }
+
+  // However, a request will still fail at runtime.
+  KJ_EXPECT_LOG(ERROR, "no such actor class");
+  KJ_EXPECT_LOG(INFO, "internal error");
+  KJ_EXPECT_LOG(INFO, "internal error");
+  KJ_EXPECT_LOG(ERROR, "internal error");
+
+  auto conn = test.connect("test-addr");
+  conn.sendHttpGet("/");
+  conn.recv(R"(
+    HTTP/1.1 500 Internal Server Error
+    Connection: close
+    Content-Length: 21
+
+    Internal Server Error)"_blockquote);
+}
+
 KJ_TEST("Server: call queue handler on service binding") {
   TestServer test(R"((
     services = [
@@ -2291,6 +2556,104 @@ KJ_TEST("Server: Durable Objects websocket hibernation") {
   wsConn.send(kj::str("\x81\x1a", confirmEviction));
   wsConn.recvWebSocket(evicted);
 }
+
+KJ_TEST("Server: tail workers") {
+  TestServer test(R"((
+    services = [
+      ( name = "hello",
+        worker = (
+          compatibilityDate = "2024-11-01",
+          modules = [
+            ( name = "main.js",
+              esModule =
+                `export default {
+                `  async fetch(req, env, ctx) {
+                `    console.log("foo", "bar");
+                `    console.log("baz");
+                `    return new Response("OK");
+                `  }
+                `}
+            )
+          ],
+          tails = ["tail", "tail2"],
+        )
+      ),
+      ( name = "tail",
+        worker = (
+          compatibilityDate = "2024-11-01",
+          modules = [
+            ( name = "main.js",
+              esModule =
+                `export default {
+                `  async tail(req, env, ctx) {
+                `    await fetch("http://tail", {
+                `      method: "POST",
+                `      body: JSON.stringify(req[0].logs.map(log => log.message))
+                `    });
+                `  }
+                `}
+            )
+          ],
+        )
+      ),
+      ( name = "tail2",
+        worker = (
+          compatibilityDate = "2024-11-01",
+          modules = [
+            ( name = "main.js",
+              esModule =
+                `export default {
+                `  async tail(req, env, ctx) {
+                `    await fetch("http://tail2/" + req[0].logs.length);
+                `  }
+                `}
+            )
+          ],
+        )
+      ),
+    ],
+    sockets = [
+      ( name = "main",
+        address = "test-addr",
+        service = "hello"
+      )
+    ]
+  ))"_kj);
+
+  test.start();
+  auto conn = test.connect("test-addr");
+  conn.sendHttpGet("/");
+  conn.recvHttp200("OK");
+
+  auto subreq = test.receiveInternetSubrequest("tail");
+  subreq.recv(R"(
+    POST / HTTP/1.1
+    Content-Length: 23
+    Host: tail
+    Content-Type: text/plain;charset=UTF-8
+
+    [["foo","bar"],["baz"]])"_blockquote);
+
+  auto subreq2 = test.receiveInternetSubrequest("tail2");
+  subreq2.recv(R"(
+    GET /2 HTTP/1.1
+    Host: tail2
+
+    )"_blockquote);
+
+  subreq.send(R"(
+    HTTP/1.1 200 OK
+    Content-Length: 0
+
+  )"_blockquote);
+
+  subreq2.send(R"(
+    HTTP/1.1 200 OK
+    Content-Length: 0
+
+  )"_blockquote);
+}
+
 // =======================================================================================
 // Test HttpOptions on receive
 
@@ -3597,6 +3960,131 @@ KJ_TEST("Server: JS RPC over HTTP connections") {
 
   auto conn = test.connect("test-addr");
   conn.httpGet200("/", "got: 35");
+}
+
+KJ_TEST("Server: Entrypoint binding with props") {
+  TestServer test(R"((
+    services = [
+      ( name = "hello",
+        worker = (
+          compatibilityDate = "2024-02-23",
+          compatibilityFlags = ["experimental"],
+          modules = [
+            ( name = "main.js",
+              esModule =
+                `import {WorkerEntrypoint} from "cloudflare:workers";
+                `export default {
+                `  async fetch(request, env) {
+                `    return new Response("got: " + await env.MyRpc.getProps());
+                `  }
+                `}
+                `export class MyRpc extends WorkerEntrypoint {
+                `  getProps() { return this.ctx.props.foo; }
+                `}
+            )
+          ],
+          bindings = [
+            ( name = "MyRpc",
+              service = (
+                name = "hello",
+                entrypoint = "MyRpc",
+                props = (
+                  json = `{"foo": 123}
+                )
+              )
+            )
+          ]
+        )
+      ),
+    ],
+    sockets = [
+      ( name = "main", address = "test-addr", service = "hello" ),
+    ]
+  ))"_kj);
+
+  test.server.allowExperimental();
+  test.start();
+
+  auto conn = test.connect("test-addr");
+  conn.httpGet200("/", "got: 123");
+}
+
+KJ_TEST("Server: ctx.exports self-referential bindings") {
+  TestServer test(R"((
+    services = [
+      ( name = "hello",
+        worker = (
+          compatibilityDate = "2024-02-23",
+          compatibilityFlags = ["experimental"],
+          modules = [
+            ( name = "main.js",
+              esModule =
+                `import { WorkerEntrypoint, DurableObject } from "cloudflare:workers";
+                `export default {
+                `  async fetch(request, env, ctx) {
+                `    // First set the actor state the old fashion way, to make sure we get
+                `    // reconnected to the same actor when using self-referential bindings.
+                `    {
+                `      let bindingActor = env.NS.get(env.NS.idFromName("qux"));
+                `      await bindingActor.setValue(234);
+                `    }
+                `
+                `    let actor = ctx.exports.MyActor.get(ctx.exports.MyActor.idFromName("qux"));
+                `    return new Response([
+                `      await ctx.exports.MyEntrypoint.foo(123),
+                `      await ctx.exports.AnotherEntrypoint.bar(321),
+                `      await actor.baz(),
+                `      await ctx.exports.default.corge(555),
+                `      await actor.grault(456),
+                `      "UnconfiguredActor" in ctx.exports,  // should be false
+                `    ].join(", "));
+                `  },
+                `  corge(i) { return `corge: ${i}` }
+                `}
+                `export class MyEntrypoint extends WorkerEntrypoint {
+                `  foo(i) { return `foo: ${i}` }
+                `  grault(i) { return `grault: ${i}` }
+                `}
+                `export class AnotherEntrypoint extends WorkerEntrypoint {
+                `  bar(i) { return `bar: ${i}` }
+                `}
+                `export class MyActor extends DurableObject {
+                `  setValue(i) { this.value = i; }
+                `  baz() { return `baz: ${this.value}` }
+                `  grault(i) { return this.ctx.exports.MyEntrypoint.grault(i); }
+                `}
+                `export class UnconfiguredActor extends DurableObject {
+                `  qux(i) { return `qux: ${i}` }
+                `}
+            )
+          ],
+          bindings = [
+            # A regular binding, just here to make sure it doesn't mess up self-referential
+            # channel numbers.
+            ( name = "INTERNET", service = "internet" ),
+
+            # Similarly, an actor namespace binding.
+            (name = "NS", durableObjectNamespace = "MyActor")
+          ],
+          durableObjectNamespaces = [
+            ( className = "MyActor",
+              uniqueKey = "mykey",
+            )
+          ],
+          durableObjectStorage = (inMemory = void)
+        )
+      ),
+    ],
+    sockets = [
+      ( name = "main", address = "test-addr", service = "hello" ),
+    ]
+  ))"_kj);
+
+  test.server.allowExperimental();
+  test.start();
+
+  auto conn = test.connect("test-addr");
+  conn.httpGet200("/", "foo: 123, bar: 321, baz: 234, corge: 555, grault: 456, false");
 }
 
 // =======================================================================================

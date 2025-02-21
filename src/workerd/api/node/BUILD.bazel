@@ -1,4 +1,4 @@
-load("@bazel_skylib//lib:selects.bzl", "selects")
+load("@aspect_rules_js//js:defs.bzl", "js_binary")
 load("//:build/kj_test.bzl", "kj_test")
 load("//:build/wd_cc_library.bzl", "wd_cc_library")
 load("//:build/wd_test.bzl", "wd_test")
@@ -9,22 +9,30 @@ wd_cc_library(
         "crypto.c++",
         "crypto-keys.c++",
         "diagnostics-channel.c++",
+        "dns.c++",
+        "timers.c++",
         "zlib-util.c++",
     ],
     hdrs = [
         "crypto.h",
         "diagnostics-channel.h",
+        "dns.h",
         "node.h",
+        "timers.h",
         "zlib-util.h",
     ],
     implementation_deps = [
+        "//src/rust/cxx-integration",
+        "//src/rust/dns",
         "//src/workerd/io",
         "@capnp-cpp//src/kj/compat:kj-gzip",
     ],
     visibility = ["//visibility:public"],
     deps = [
         ":node-core",
+        "//src/node",
         "@capnp-cpp//src/kj/compat:kj-brotli",
+        "@ncrypto",
     ],
 )
 
@@ -108,7 +116,54 @@ wd_test(
 wd_test(
     src = "tests/crypto_keys-test.wd-test",
     args = ["--experimental"],
-    data = ["tests/crypto_keys-test.js"],
+    data = [
+        "tests/crypto_keys-test.js",
+        "tests/fixtures/agent1-cert.pem",
+        "tests/fixtures/dh_private.pem",
+        "tests/fixtures/dh_public.pem",
+        "tests/fixtures/dsa_private.pem",
+        "tests/fixtures/dsa_private_1025.pem",
+        "tests/fixtures/dsa_private_encrypted.pem",
+        "tests/fixtures/dsa_private_encrypted_1025.pem",
+        "tests/fixtures/dsa_private_pkcs8.pem",
+        "tests/fixtures/dsa_public.pem",
+        "tests/fixtures/dsa_public_1025.pem",
+        "tests/fixtures/ec_p256_private.pem",
+        "tests/fixtures/ec_p256_public.pem",
+        "tests/fixtures/ec_p384_private.pem",
+        "tests/fixtures/ec_p384_public.pem",
+        "tests/fixtures/ec_p521_private.pem",
+        "tests/fixtures/ec_p521_public.pem",
+        "tests/fixtures/ec_secp256k1_private.pem",
+        "tests/fixtures/ec_secp256k1_public.pem",
+        "tests/fixtures/ed25519_private.pem",
+        "tests/fixtures/ed25519_public.pem",
+        "tests/fixtures/ed448_private.pem",
+        "tests/fixtures/ed448_public.pem",
+        "tests/fixtures/rsa_private.pem",
+        "tests/fixtures/rsa_private_2048.pem",
+        "tests/fixtures/rsa_private_4096.pem",
+        "tests/fixtures/rsa_private_b.pem",
+        "tests/fixtures/rsa_private_encrypted.pem",
+        "tests/fixtures/rsa_private_pkcs8.pem",
+        "tests/fixtures/rsa_private_pkcs8_bad.pem",
+        "tests/fixtures/rsa_pss_private_2048.pem",
+        "tests/fixtures/rsa_pss_private_2048_sha1_sha1_20.pem",
+        "tests/fixtures/rsa_pss_private_2048_sha256_sha256_16.pem",
+        "tests/fixtures/rsa_pss_private_2048_sha512_sha256_20.pem",
+        "tests/fixtures/rsa_pss_public_2048.pem",
+        "tests/fixtures/rsa_pss_public_2048_sha1_sha1_20.pem",
+        "tests/fixtures/rsa_pss_public_2048_sha256_sha256_16.pem",
+        "tests/fixtures/rsa_pss_public_2048_sha512_sha256_20.pem",
+        "tests/fixtures/rsa_public.pem",
+        "tests/fixtures/rsa_public_2048.pem",
+        "tests/fixtures/rsa_public_4096.pem",
+        "tests/fixtures/rsa_public_b.pem",
+        "tests/fixtures/x25519_private.pem",
+        "tests/fixtures/x25519_public.pem",
+        "tests/fixtures/x448_private.pem",
+        "tests/fixtures/x448_public.pem",
+    ],
 )
 
 wd_test(
@@ -242,4 +297,40 @@ wd_test(
         ":debug_build": ["@platforms//:incompatible"],
         "//conditions:default": [],
     }),
+)
+
+wd_test(
+    src = "tests/dns-nodejs-test.wd-test",
+    args = ["--experimental"],
+    data = ["tests/dns-nodejs-test.js"],
+)
+
+js_binary(
+    name = "net-nodejs-tcp-server",
+    entry_point = "tests/net-nodejs-tcp-server.js",
+)
+
+wd_test(
+    size = "large",
+    src = "tests/net-nodejs-test.wd-test",
+    args = ["--experimental"],
+    data = ["tests/net-nodejs-test.js"],
+    sidecar = "net-nodejs-tcp-server",
+    target_compatible_with = select({
+        # TODO(soon): Investigate why this test timeout on Windows.
+        "@platforms//os:windows": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+)
+
+wd_test(
+    src = "tests/timers-nodejs-test.wd-test",
+    args = ["--experimental"],
+    data = ["tests/timers-nodejs-test.js"],
+)
+
+wd_test(
+    src = "tests/async_hooks-nodejs-test.wd-test",
+    args = ["--experimental"],
+    data = ["tests/async_hooks-nodejs-test.js"],
 )

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <workerd/io/compatibility-date.capnp.h>
 #include <workerd/jsg/jsg.h>
 #include <workerd/util/uuid.h>
 
@@ -92,10 +93,10 @@ class MemoryCacheProvider;
 // fairly different from this implementation so quite a few of the details here
 // are expected to change.
 class SharedMemoryCache: public kj::AtomicRefcounted {
-private:
+ private:
   struct InProgress;
 
-public:
+ public:
   struct ThreadUnsafeData;
 
   struct Limits {
@@ -169,11 +170,11 @@ public:
       kj::Maybe<AdditionalResizeMemoryLimitHandler&> additionalResizeMemoryLimitHandler,
       const kj::MonotonicClock& timer);
 
-public:
+ public:
   // RAII class that attaches itself to a cache, suggests cache limits to the
   // cache it is attached to, and allows interacting with the cache.
   class Use {
-  public:
+   public:
     KJ_DISALLOW_COPY(Use);
 
     Use(kj::Own<const SharedMemoryCache> cache, const Limits& limits);
@@ -201,7 +202,9 @@ public:
     kj::OneOf<kj::Own<CacheValue>, kj::Promise<GetWithFallbackOutcome>> getWithFallback(
         const kj::String& key, SpanBuilder& span) const;
 
-  private:
+    void delete_(const kj::String& key) const;
+
+   private:
     // Creates a new FallbackDoneCallback associated with the given
     // InProgress struct. This is called whenever getWithFallback() wants to
     // invoke a fallback but it does not call the fallback directly. The caller
@@ -222,7 +225,7 @@ public:
     Limits limits;
   };
 
-private:
+ private:
   struct InProgress {
     const kj::String key;
 
@@ -236,7 +239,7 @@ private:
     // Callbacks for a HashIndex that allow locating an InProgress struct
     // based on the cache key.
     class KeyCallbacks {
-    public:
+     public:
       inline const kj::String& keyForRow(const kj::Own<InProgress>& entry) const {
         return entry->key;
       }
@@ -297,7 +300,7 @@ private:
   // cache key, which is a string. This is used for all key-based cache
   // operations.
   class KeyCallbacks {
-  public:
+   public:
     inline const kj::String& keyForRow(const MemoryCacheEntry& entry) const {
       return entry.key;
     }
@@ -316,7 +319,7 @@ private:
   // Callbacks for a TreeIndex that allow sorting cache entries by their
   // liveliness. This is used to evict the least recently used entry.
   class LivelinessCallbacks {
-  public:
+   public:
     inline const uint64_t& keyForRow(const MemoryCacheEntry& entry) const {
       return entry.liveliness;
     }
@@ -338,7 +341,7 @@ private:
   // the largest cache values when the maximum value size is reduced, e.g.,
   // when a new version of a worker is deployed.
   class ValueSizeCallbacks {
-  public:
+   public:
     inline const MemoryCacheEntry& keyForRow(const MemoryCacheEntry& entry) const {
       return entry;
     }
@@ -361,7 +364,7 @@ private:
   // they are not least recently used. Values with no expiration timestamp are
   // at the very end, ordered by their cache keys.
   class ExpirationCallbacks {
-  public:
+   public:
     inline const MemoryCacheEntry& keyForRow(const MemoryCacheEntry& entry) const {
       return entry;
     }
@@ -378,7 +381,7 @@ private:
       return e.key < key.key;
     }
 
-  private:
+   private:
     inline bool isBefore(const kj::Maybe<double>& a, const kj::Maybe<double>& b) const {
       KJ_IF_SOME(da, a) {
         KJ_IF_SOME(db, b) {
@@ -393,7 +396,7 @@ private:
     }
   };
 
-public:
+ public:
   struct ThreadUnsafeData {
     KJ_DISALLOW_COPY_AND_MOVE(ThreadUnsafeData);
 
@@ -441,7 +444,7 @@ public:
     kj::Table<kj::Own<InProgress>, kj::HashIndex<InProgress::KeyCallbacks>> inProgress;
   };
 
-private:
+ private:
   // To ensure thread-safety, all mutable data is guarded by a mutex. Each cache
   // operation requires an exclusive lock. Even read-only operations need to
   // update the liveliness of cache entries, which currently requires a lock.
@@ -471,7 +474,7 @@ private:
 // all calls from JavaScript are essentially forwarded to that object, which
 // manages interaction with the shared cache in a thread-safe manner.
 class MemoryCache: public jsg::Object {
-public:
+ public:
   MemoryCache(SharedMemoryCache::Use&& use): cacheUse(kj::mv(use)) {}
 
   using FallbackFunction = jsg::Function<jsg::Promise<CacheValueProduceResult>(kj::String)>;
@@ -482,11 +485,17 @@ public:
       jsg::NonCoercible<kj::String> key,
       jsg::Optional<FallbackFunction> optionalFallback);
 
-  JSG_RESOURCE_TYPE(MemoryCache) {
+  // Delete a value from the cache.
+  void delete_(jsg::Lock& js, jsg::NonCoercible<kj::String> key);
+
+  JSG_RESOURCE_TYPE(MemoryCache, CompatibilityFlags::Reader flags) {
     JSG_METHOD(read);
+    if (flags.getMemoryCacheDelete()) {
+      JSG_METHOD_NAMED(delete, delete_);
+    }
   }
 
-private:
+ private:
   SharedMemoryCache::Use cacheUse;
 };
 
@@ -498,7 +507,7 @@ private:
 // that can be passed along to the individual cache instances so we can monitor just how much
 // the in memory cache is being used.
 class MemoryCacheProvider {
-public:
+ public:
   MemoryCacheProvider(const kj::MonotonicClock& timer,
       kj::Maybe<SharedMemoryCache::AdditionalResizeMemoryLimitHandler>
           additionalResizeMemoryLimitHandler = kj::none);
@@ -509,7 +518,7 @@ public:
 
   void removeInstance(const SharedMemoryCache& instance) const;
 
-private:
+ private:
   kj::Maybe<SharedMemoryCache::AdditionalResizeMemoryLimitHandler>
       additionalResizeMemoryLimitHandler;
 

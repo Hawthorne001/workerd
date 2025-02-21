@@ -21,8 +21,24 @@
 
 #include <array>
 #include <cmath>
+#include <regex>
 
 namespace workerd::api::public_beta {
+kj::Own<kj::HttpClient> r2GetClient(
+    IoContext& context, uint subrequestChannel, R2UserTracing user) {
+  kj::Vector<Span::Tag> tags;
+  tags.add("rpc.service"_kjc, kj::str("r2"_kjc));
+  tags.add(user.method.key, kj::str(user.method.value));
+  KJ_IF_SOME(b, user.bucket) {
+    tags.add("cloudflare.r2.bucket"_kjc, kj::str(b));
+  }
+  KJ_IF_SOME(tag, user.extraTag) {
+    tags.add(tag.key, kj::str(tag.value));
+  }
+
+  return context.getHttpClientWithSpans(subrequestChannel, true, kj::none, user.op, kj::mv(tags));
+}
+
 static bool isWholeNumber(double x) {
   double intpart;
   return modf(x, &intpart) == 0;
@@ -154,10 +170,17 @@ static jsg::Ref<T> parseObjectMetadata(R2HeadResponse::Reader responseReader,
     }
   }
 
+  jsg::Optional<kj::String> ssecKeyMd5;
+
+  if (responseReader.hasSsec()) {
+    auto ssecBuilder = responseReader.getSsec();
+    ssecKeyMd5 = kj::str(ssecBuilder.getKeyMd5());
+  }
+
   return jsg::alloc<T>(kj::str(responseReader.getName()), kj::str(responseReader.getVersion()),
       responseReader.getSize(), kj::str(responseReader.getEtag()), kj::mv(checksums), uploaded,
       kj::mv(httpMetadata), kj::mv(customMetadata), range,
-      kj::str(responseReader.getStorageClass()), kj::fwd<Args>(args)...);
+      kj::str(responseReader.getStorageClass()), kj::mv(ssecKeyMd5), kj::fwd<Args>(args)...);
 }
 
 template <HeadResultT T, typename... Args>
@@ -253,6 +276,25 @@ void initOnlyIf(jsg::Lock& js, Builder& builder, Options& o) {
   }
 }
 
+kj::Maybe<kj::String> buildSsecKey(
+    kj::Maybe<kj::OneOf<kj::Array<byte>, kj::String>> maybeRawSsecKey) {
+  KJ_IF_SOME(rawSsecKey, maybeRawSsecKey) {
+    KJ_SWITCH_ONEOF(rawSsecKey) {
+      KJ_CASE_ONEOF(keyString, kj::String) {
+        JSG_REQUIRE(std::regex_match(keyString.begin(), keyString.end(), std::regex("^[0-9a-f]+$")),
+            Error, "SSE-C Key has invalid format");
+        JSG_REQUIRE(keyString.size() == 64, Error, "SSE-C Key must be 32 bytes in length");
+        return kj::str(keyString);
+      }
+      KJ_CASE_ONEOF(keyBuff, kj::Array<byte>) {
+        JSG_REQUIRE(keyBuff.size() == 32, Error, "SSE-C Key must be 32 bytes in length");
+        return kj::encodeHex(keyBuff);
+      }
+    }
+  }
+  return kj::none;
+}
+
 template <typename Builder, typename Options>
 void initGetOptions(jsg::Lock& js, Builder& builder, Options& o) {
   initOnlyIf(js, builder, o);
@@ -296,6 +338,11 @@ void initGetOptions(jsg::Lock& js, Builder& builder, Options& o) {
       }
     }
   }
+  kj::Maybe<kj::String> maybeSsecKey = buildSsecKey(kj::mv(o.ssecKey));
+  KJ_IF_SOME(ssecKey, maybeSsecKey) {
+    auto ssecBuilder = builder.initSsec();
+    ssecBuilder.setKey(ssecKey);
+  }
 }
 
 static bool isQuotedEtag(kj::StringPtr etag) {
@@ -309,7 +356,8 @@ jsg::Promise<kj::Maybe<jsg::Ref<R2Bucket::HeadResult>>> R2Bucket::head(jsg::Lock
   return js.evalNow([&] {
     auto& context = IoContext::current();
 
-    auto client = context.getHttpClient(clientIndex, true, kj::none, "r2_get"_kjc);
+    auto client = r2GetClient(context, clientIndex,
+        {"r2_get"_kjc, {"rpc.method"_kjc, "GetObject"_kjc}, this->adminBucketName()});
 
     capnp::JsonCodec json;
     json.handleByAnnotation<R2BindingRequest>();
@@ -345,7 +393,9 @@ R2Bucket::get(jsg::Lock& js,
   return js.evalNow([&] {
     auto& context = IoContext::current();
 
-    auto client = context.getHttpClient(clientIndex, true, kj::none, "r2_get"_kjc);
+    auto client = r2GetClient(context, clientIndex,
+        {"r2_get"_kjc, {"rpc.method"_kjc, "GetObject"_kjc}, this->adminBucketName(),
+          {{"cloudflare.r2.bucket"_kjc, name.asPtr()}}});
 
     capnp::JsonCodec json;
     json.handleByAnnotation<R2BindingRequest>();
@@ -407,7 +457,9 @@ jsg::Promise<kj::Maybe<jsg::Ref<R2Bucket::HeadResult>>> R2Bucket::put(jsg::Lock&
     });
 
     auto& context = IoContext::current();
-    auto client = context.getHttpClient(clientIndex, true, kj::none, "r2_put"_kjc);
+    auto client = r2GetClient(context, clientIndex,
+        {"r2_put"_kjc, {"rpc.method"_kjc, "PutObject"_kjc}, this->adminBucketName(),
+          {{"cloudflare.r2.key"_kjc, name.asPtr()}}});
 
     capnp::JsonCodec json;
     json.handleByAnnotation<R2BindingRequest>();
@@ -559,6 +611,11 @@ jsg::Promise<kj::Maybe<jsg::Ref<R2Bucket::HeadResult>>> R2Bucket::put(jsg::Lock&
       KJ_IF_SOME(s, o.storageClass) {
         putBuilder.setStorageClass(s);
       }
+      kj::Maybe<kj::String> maybeSsecKey = buildSsecKey(kj::mv(o.ssecKey));
+      KJ_IF_SOME(ssecKey, maybeSsecKey) {
+        auto ssecBuilder = putBuilder.initSsec();
+        ssecBuilder.setKey(ssecKey);
+      }
     }
 
     auto requestJson = json.encode(requestBuilder);
@@ -593,8 +650,9 @@ jsg::Promise<jsg::Ref<R2MultipartUpload>> R2Bucket::createMultipartUpload(jsg::L
     const jsg::TypeHandler<jsg::Ref<R2Error>>& errorType) {
   return js.evalNow([&] {
     auto& context = IoContext::current();
-    auto client =
-        context.getHttpClient(clientIndex, true, kj::none, "r2_createMultipartUpload"_kjc);
+    auto client = r2GetClient(context, clientIndex,
+        {"r2_createMultipartUpload"_kjc, {"rpc.method"_kjc, "CreateMultipartUpload"_kjc},
+          this->adminBucketName()});
 
     capnp::JsonCodec json;
     json.handleByAnnotation<R2BindingRequest>();
@@ -651,6 +709,11 @@ jsg::Promise<jsg::Ref<R2MultipartUpload>> R2Bucket::createMultipartUpload(jsg::L
       KJ_IF_SOME(s, o.storageClass) {
         createMultipartUploadBuilder.setStorageClass(s);
       }
+      kj::Maybe<kj::String> maybeSsecKey = buildSsecKey(kj::mv(o.ssecKey));
+      KJ_IF_SOME(ssecKey, maybeSsecKey) {
+        auto ssecBuilder = createMultipartUploadBuilder.initSsec();
+        ssecBuilder.setKey(ssecKey);
+      }
     }
 
     auto requestJson = json.encode(requestBuilder);
@@ -687,7 +750,20 @@ jsg::Promise<void> R2Bucket::delete_(jsg::Lock& js,
     const jsg::TypeHandler<jsg::Ref<R2Error>>& errorType) {
   return js.evalNow([&] {
     auto& context = IoContext::current();
-    auto client = context.getHttpClient(clientIndex, true, kj::none, "r2_delete"_kjc);
+    auto deleteKey = [&]() {
+      KJ_SWITCH_ONEOF(keys) {
+        KJ_CASE_ONEOF(ks, kj::Array<kj::String>) {
+          return kj::str(ks);
+        }
+        KJ_CASE_ONEOF(k, kj::String) {
+          return kj::str(k);
+        }
+      }
+      KJ_UNREACHABLE;
+    }();
+    auto client = r2GetClient(context, clientIndex,
+        {"r2_delete"_kjc, {"rpc.method"_kjc, "DeleteObject"_kjc}, this->adminBucketName(),
+          {{"cloudflare.r2.delete"_kjc, deleteKey.asPtr()}}});
 
     capnp::JsonCodec json;
     json.handleByAnnotation<R2BindingRequest>();
@@ -732,7 +808,8 @@ jsg::Promise<R2Bucket::ListResult> R2Bucket::list(jsg::Lock& js,
     CompatibilityFlags::Reader flags) {
   return js.evalNow([&] {
     auto& context = IoContext::current();
-    auto client = context.getHttpClient(clientIndex, true, kj::none, "r2_list"_kjc);
+    auto client = r2GetClient(context, clientIndex,
+        {"r2_list"_kjc, {"rpc.method"_kjc, "ListObjects"_kjc}, this->adminBucketName()});
 
     capnp::JsonCodec json;
     json.handleByAnnotation<R2BindingRequest>();

@@ -5,7 +5,7 @@
 #pragma once
 // This file defines Event- and EventTarget-related APIs.
 //
-// TODO(cleanp): Rename to events.h?
+// TODO(cleanup): Rename to events.h?
 
 #include <workerd/io/compatibility-date.capnp.h>
 #include <workerd/io/io-own.h>
@@ -24,7 +24,7 @@ class ActorState;
 
 // An implementation of the Web Platform Standard Event API
 class Event: public jsg::Object {
-public:
+ public:
   struct Init final {
     jsg::Optional<bool> bubbles;
     jsg::Optional<bool> cancelable;
@@ -131,6 +131,10 @@ public:
   // successfully and will remain set after dispatching is completed.
   jsg::Optional<jsg::Ref<EventTarget>> getCurrentTarget();
 
+  // Because we don't support hierarchical EventTargets, this function
+  // will always return the same value as getCurrentTarget().
+  jsg::Optional<jsg::Ref<EventTarget>> getTarget();
+
   // For our implementation, since we do not support hierarchical EventTargets,
   // the composedPath is always either an empty array if the Event is currently
   // not being dispatched, or an array containing only the currentTarget if
@@ -151,6 +155,7 @@ public:
       JSG_READONLY_PROTOTYPE_PROPERTY(defaultPrevented, getDefaultPrevented);
       JSG_READONLY_PROTOTYPE_PROPERTY(returnValue, getReturnValue);
       JSG_READONLY_PROTOTYPE_PROPERTY(currentTarget, getCurrentTarget);
+      JSG_READONLY_PROTOTYPE_PROPERTY(target, getTarget);
       JSG_READONLY_PROTOTYPE_PROPERTY(srcElement, getCurrentTarget);
       JSG_READONLY_PROTOTYPE_PROPERTY(timeStamp, getTimestamp);
       JSG_READONLY_PROTOTYPE_PROPERTY(isTrusted, getIsTrusted);
@@ -165,6 +170,7 @@ public:
       JSG_READONLY_INSTANCE_PROPERTY(defaultPrevented, getDefaultPrevented);
       JSG_READONLY_INSTANCE_PROPERTY(returnValue, getReturnValue);
       JSG_READONLY_INSTANCE_PROPERTY(currentTarget, getCurrentTarget);
+      JSG_READONLY_INSTANCE_PROPERTY(target, getTarget);
       JSG_READONLY_INSTANCE_PROPERTY(srcElement, getCurrentTarget);
       JSG_READONLY_INSTANCE_PROPERTY(timeStamp, getTimestamp);
       JSG_READONLY_INSTANCE_PROPERTY(isTrusted, getIsTrusted);
@@ -188,7 +194,7 @@ public:
     tracker.trackField("target", target);
   }
 
-private:
+ private:
   kj::StringPtr type;
   kj::String ownType;
   Init init;
@@ -205,7 +211,7 @@ private:
 };
 
 class ExtendableEvent: public Event {
-public:
+ public:
   using Event::Event;
 
   // While ExtendableEvent is defined by the spec to be constructable, there's really not a
@@ -232,7 +238,7 @@ public:
 
 // An implementation of the Web Platform Standard CustomEvent API
 class CustomEvent: public Event {
-public:
+ public:
   struct CustomEventInit final {
     jsg::Optional<bool> bubbles;
     jsg::Optional<bool> cancelable;
@@ -262,13 +268,13 @@ public:
     tracker.trackField("detail", detail);
   }
 
-private:
+ private:
   jsg::Optional<jsg::JsRef<jsg::JsValue>> detail;
 };
 
 // An implementation of the Web Platform Standard EventTarget API
 class EventTarget: public jsg::Object {
-public:
+ public:
   ~EventTarget() noexcept(false);
 
   size_t getHandlerCount(kj::StringPtr type) const;
@@ -311,7 +317,7 @@ public:
     HandlerFunction handleEvent;
     JSG_STRUCT(handleEvent);
 
-    // TODO(cleanp): Get rid of this override and parse the type directly in param-extractor.rs
+    // TODO(cleanup): Get rid of this override and parse the type directly in param-extractor.rs
     JSG_STRUCT_TS_OVERRIDE({
       handleEvent: (event: Event) => any | undefined;
     });
@@ -362,10 +368,10 @@ public:
 
   void visitForMemoryInfo(jsg::MemoryTracker& tracker) const;
 
-private:
+ private:
   // RAII-style listener that can be attached to an EventTarget.
   class NativeHandler {
-  public:
+   public:
     using Signature = void(jsg::Ref<Event>);
     NativeHandler(jsg::Lock& js,
         EventTarget& target,
@@ -381,7 +387,7 @@ private:
 
     void visitForGc(jsg::GcVisitor& visitor);
 
-  private:
+   private:
     void detach();
 
     kj::String type;
@@ -407,8 +413,8 @@ private:
       HandlerFunction callback;
 
       // If the event handler is registered with an AbortSignal, then the abortHandler points
-      // at the NativeHandler representing that registration, so that if this object is GC'd before
-      // the AbortSignal is signaleled, we unregister ourselves from listening on it. Note that
+      // at the NativeHandler representing that registration, so that if this object is GC'ed before
+      // the AbortSignal is signalled, we unregister ourselves from listening on it. Note that
       // this is Own<void> for the same reason newNativeHandler() returns Own<void>: We are not
       // supposed to do anything with this except drop it.
       kj::Maybe<kj::Own<void>> abortHandler;
@@ -504,7 +510,7 @@ private:
 
 // An implementation of the Web Platform Standard AbortSignal API
 class AbortSignal final: public EventTarget {
-public:
+ public:
   enum class Flag { NONE, NEVER_ABORTS };
 
   AbortSignal(kj::Maybe<kj::Exception> exception = kj::none,
@@ -596,7 +602,7 @@ public:
     tracker.trackField("reason", reason);
   }
 
-private:
+ private:
   IoOwn<RefcountedCanceler> canceler;
   Flag flag;
   kj::Maybe<jsg::JsRef<jsg::JsValue>> reason;
@@ -609,7 +615,7 @@ private:
 
 // An implementation of the Web Platform Standard AbortController API
 class AbortController final: public jsg::Object {
-public:
+ public:
   explicit AbortController(): signal(jsg::alloc<AbortSignal>()) {}
 
   static jsg::Ref<AbortController> constructor() {
@@ -635,11 +641,11 @@ public:
     tracker.trackField("signal", signal);
   }
 
-private:
+ private:
   jsg::Ref<AbortSignal> signal;
 
   void visitForGc(jsg::GcVisitor& visitor) {
-    // We have to be careful with gc here. The event listeners added to the AbortSignal
+    // We have to be careful with GC here. The event listeners added to the AbortSignal
     // could hold a circular reference to the AbortController.
     visitor.visit(signal);
   }
@@ -649,7 +655,7 @@ private:
 // to be global and provides task scheduling APIs. We currently only implement
 // a subset of the API that is being defined.
 class Scheduler final: public jsg::Object {
-public:
+ public:
   struct WaitOptions {
     jsg::Optional<jsg::Ref<AbortSignal>> signal;
     JSG_STRUCT(signal);
@@ -664,7 +670,7 @@ public:
     JSG_METHOD(wait);
   }
 
-private:
+ private:
 };
 
 #define EW_BASICS_ISOLATE_TYPES                                                                    \

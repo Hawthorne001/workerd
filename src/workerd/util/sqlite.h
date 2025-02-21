@@ -5,8 +5,10 @@
 #pragma once
 
 #include <kj/filesystem.h>
+#include <kj/function.h>
 #include <kj/list.h>
 #include <kj/one-of.h>
+#include <kj/string.h>
 
 #include <utility>
 
@@ -23,7 +25,7 @@ using kj::uint;
 
 // Used to collect periodic metrics about queries and size of sqlite db
 class SqliteObserver {
-public:
+ public:
   virtual void addQueryStats(uint64_t rowsRead, uint64_t rowsWritten) {}
   // The method is not used by the SqliteDatabase, it is added here for convenience
   virtual void setSqliteStoredBytes(uint64_t sqliteStoredBytes) {}
@@ -39,7 +41,7 @@ public:
 // representing a true disk directory, the real SQLite disk implementation will be used with
 // all of its features.
 class SqliteDatabase {
-public:
+ public:
   class Vfs;
   class Query;
   class Statement;
@@ -72,7 +74,7 @@ public:
   // of returning false. If they do, this exception will pass through to the caller in place of
   // a generic "not authorized" exception.
   class Regulator {
-  public:
+   public:
     // Returns whether the given name (which may be a table, index, view, etc.) is allowed to be
     // accessed. Typically, this is used to deny access to names containing special prefixes
     // indicating that they are privileged, like `_cf_`.
@@ -126,7 +128,7 @@ public:
   // Don't use this for one-off queries; use run() instead.
   Statement prepare(const Regulator& regulator, kj::StringPtr sqlCode);
 
-  // Prepares a statement that may acutally be multiple statements (separated by semicolons).
+  // Prepares a statement that may actually be multiple statements (separated by semicolons).
   // In this case, the code is not actually parsed until first executed (this implies
   // `prepareMulti()` will never throw since it doesn't actually do anything). This lazy-parsing
   // behavior is necessary in the case that later statements depend on the effects of earlier ones.
@@ -140,7 +142,7 @@ public:
 
   // Convenience method to start a query. This is equivalent to `prepare(sqlCode).run(bindings...)`
   // except:
-  // - It may be more efficient for one-off use caes.
+  // - It may be more efficient for one-off use case.
   // - The code can include multiple statements, separated by semicolons. The bindings and returned
   //   `Query` object are both associated with the last statement. This is particularly convenient
   //   for doing database initialization such as creating several tables at once.
@@ -202,7 +204,7 @@ public:
 
   // Objects that need to be notified when reset() is called may inherit `ResetListener`.
   class ResetListener {
-  public:
+   public:
     ResetListener(SqliteDatabase& db): db(db) {
       db.resetListeners.add(*this);
     }
@@ -218,10 +220,10 @@ public:
     // called before actually resetting the database.
     virtual void beforeSqliteReset() = 0;
 
-  protected:  // so that subclasess don't have to store their own copy of the `db` reference
+   protected:  // so that subclasses don't have to store their own copy of the `db` reference
     SqliteDatabase& db;
 
-  private:
+   private:
     kj::ListLink<ResetListener> link;
 
     friend class SqliteDatabase;
@@ -256,7 +258,7 @@ public:
     }
   }
 
-private:
+ private:
   const Vfs& vfs;
   kj::Path path;
   bool readOnly;
@@ -321,7 +323,7 @@ private:
 
   enum Multi { SINGLE, MULTI };
 
-  // A pair of a complied statement, and a description of the interesting state changes it applies.
+  // A pair of a compiled statement, and a description of the interesting state changes it applies.
   struct StatementAndEffect {
     kj::Own<sqlite3_stmt> statement;
     StateChange stateChange;
@@ -362,7 +364,7 @@ private:
     StateChange stateChange = NoChange();
 
     // If the parse fails because the authorizer rejects it, it may fill in `authError` to provide
-    // a more friendly error message. This error will be thrown by the overal query. Otherwise,
+    // a more friendly error message. This error will be thrown by the overall query. Otherwise,
     // a generic "not authorized" error is thrown.
     kj::Maybe<kj::Exception> authError;
   };
@@ -370,7 +372,7 @@ private:
 
 // Represents a prepared SQL statement, which can be executed many times.
 class SqliteDatabase::Statement final: private ResetListener {
-public:
+ public:
   // Convenience method to start a query. This is equivalent to:
   //
   //     SqliteDatabase::Query(db, statement, bindings...);
@@ -385,7 +387,7 @@ public:
   template <typename... Params>
   Query run(Params&&... bindings);
 
-private:
+ private:
   const Regulator& regulator;
   kj::OneOf<kj::String, StatementAndEffect> stmt;
 
@@ -418,7 +420,7 @@ private:
 // Only one Query can exist at a time, for a given database. It should probably be allocated on
 // the stack.
 class SqliteDatabase::Query final: private ResetListener {
-public:
+ public:
   using ValuePtr =
       kj::OneOf<kj::ArrayPtr<const byte>, kj::StringPtr, int64_t, double, decltype(nullptr)>;
 
@@ -512,7 +514,7 @@ public:
     }
   }
 
-private:
+ private:
   const Regulator& regulator;
   StatementAndEffect ownStatement;                // for one-off queries
   kj::Maybe<StatementAndEffect&> maybeStatement;  // null if database was reset
@@ -633,7 +635,7 @@ struct SqliteDatabase::VfsOptions {
 //
 // An instance of `Vfs` can safely be used across multiple threads.
 class SqliteDatabase::Vfs {
-public:
+ public:
   // Pretend `Options` is declared nested here. Due to a C++ quirk, we cannot actually declare it
   // nested while having default-initialized parameters of this type.
   using Options = VfsOptions;
@@ -675,7 +677,7 @@ public:
 
   KJ_DISALLOW_COPY_AND_MOVE(Vfs);
 
-private:
+ private:
   const kj::Directory& directory;
   kj::Own<LockManager> ownLockManager;
   const LockManager& lockManager;
@@ -720,7 +722,7 @@ private:
 };
 
 class SqliteDatabase::LockManager {
-public:
+ public:
   // Obtain a lock for the given database path. The main database file is also provided in case
   // it is useful. This method only creates the `Lock` object; it's level starts out as UNLOCKED,
   // meaning no actual lock is held yet.
@@ -744,14 +746,14 @@ public:
 // native implementation kicks in, which is based on advisory file locks at the OS level, as well
 // as mmapped shared memory from a file next to the database with suffix `-shm`.
 class SqliteDatabase::Lock {
-public:
+ public:
   // The main database can be locked at one of these levels.
   //
   // See the SQLite documentation for an explanation of lock levels:
   //     https://www.sqlite.org/lockingv3.html
   //
   // Note, however, that this locking scheme is mostly unused in WAL mode, which everyone should
-  // be using now. In WAL mode, clients almost always have only a `SHARED` lock. It is inreased
+  // be using now. In WAL mode, clients almost always have only a `SHARED` lock. It is increased
   // to `EXCLUSIVE` only when shutting down the database, in order to safely delete the WAL and
   // WAL-index (-shm) files.
   //
@@ -824,6 +826,10 @@ public:
   static constexpr uint WAL_WRITE_LOCK = 0;
   static constexpr uint WAL_CKPT_LOCK = 1;
   static constexpr uint WAL_RECOVER_LOCK = 2;
+  static constexpr uint WAL_READ_LOCK_BASE = 3;
+
+  // There are exactly this may WAL-mode read-mark locks.
+  static constexpr uint WAL_READ_LOCK_COUNT = WAL_LOCK_COUNT - WAL_READ_LOCK_BASE;
 
   // SQLite sets aside bytes [120, 128) of the first shared memory region for use by the WAL locking
   // implementation. SQLite will never touch these bytes. This may or may not be needed by your

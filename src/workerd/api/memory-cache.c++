@@ -349,6 +349,11 @@ void SharedMemoryCache::Use::handleFallbackFailure(InProgress& inProgress) const
   }
 }
 
+void SharedMemoryCache::Use::delete_(const kj::String& key) const {
+  auto data = cache->data.lockExclusive();
+  cache->removeIfExistsWhileLocked(*data, key);
+}
+
 // Attempts to serialize a JavaScript value. If that fails, this function throws
 // a tunneled exception, see jsg::createTunneledException().
 static kj::Own<CacheValue> hackySerialize(jsg::Lock& js, jsg::JsRef<jsg::JsValue>& value) {
@@ -388,7 +393,7 @@ jsg::Promise<jsg::JsRef<jsg::JsValue>> MemoryCache::read(jsg::Lock& js,
   KJ_IF_SOME(fallback, optionalFallback) {
     KJ_SWITCH_ONEOF(cacheUse.getWithFallback(key.value, readSpan)) {
       KJ_CASE_ONEOF(result, kj::Own<CacheValue>) {
-        // Optimization: Don't even release the isolate lock if the value is aleady in cache.
+        // Optimization: Don't even release the isolate lock if the value is already in cache.
         jsg::Deserializer deserializer(js, result->bytes.asPtr());
         return js.resolvedPromise(jsg::JsRef(js, deserializer.readValue(js)));
       }
@@ -442,6 +447,16 @@ jsg::Promise<jsg::JsRef<jsg::JsValue>> MemoryCache::read(jsg::Lock& js,
     }
     return js.resolvedPromise(jsg::JsRef(js, js.undefined()));
   }
+}
+
+void MemoryCache::delete_(jsg::Lock& js, jsg::NonCoercible<kj::String> key) {
+  // Ignore operations on keys exceeding key max size.
+  if (key.value.size() > MAX_KEY_SIZE) {
+    js.throwException(js.rangeError("Key too large."_kj));
+    return;
+  }
+
+  cacheUse.delete_(key.value);
 }
 
 // ======================================================================================

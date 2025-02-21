@@ -586,7 +586,7 @@ jsg::Ref<Headers> Headers::deserialize(
 namespace {
 
 class BodyBufferInputStream final: public ReadableStreamSource {
-public:
+ public:
   BodyBufferInputStream(Body::Buffer buffer)
       : unread(buffer.view),
         ownBytes(kj::mv(buffer.ownBytes)) {}
@@ -618,7 +618,7 @@ public:
     co_return;
   }
 
-private:
+ private:
   kj::ArrayPtr<const byte> unread;
   kj::OneOf<kj::Own<Body::RefcountedBytes>, jsg::Ref<Blob>> ownBytes;
 };
@@ -699,6 +699,12 @@ Body::ExtractedBody Body::extractBody(jsg::Lock& js, Initializer init) {
       buffer = formData->serialize(boundary);
     }
     KJ_CASE_ONEOF(searchParams, jsg::Ref<URLSearchParams>) {
+      auto type = MimeType::FORM_URLENCODED.clone();
+      type.addParam("charset"_kj, "UTF-8"_kj);
+      contentType = type.toString();
+      buffer = searchParams->toString();
+    }
+    KJ_CASE_ONEOF(searchParams, jsg::Ref<url::URLSearchParams>) {
       auto type = MimeType::FORM_URLENCODED.clone();
       type.addParam("charset"_kj, "UTF-8"_kj);
       contentType = type.toString();
@@ -1208,7 +1214,7 @@ kj::Maybe<kj::String> Request::serializeCfBlobJson(jsg::Lock& js) {
       break;
     case CacheMode::NOCACHE:
       ttl = 0;
-      KJ_FALLTHROUGH;
+      break;
     case CacheMode::NONE:
       KJ_UNREACHABLE;
   }
@@ -1227,14 +1233,17 @@ kj::Maybe<kj::String> Request::serializeCfBlobJson(jsg::Lock& js) {
 
 void RequestInitializerDict::validate(jsg::Lock& js) {
   KJ_IF_SOME(c, cache) {
-    // Check compatability flag
+    // Check compatibility flag
     JSG_REQUIRE(FeatureFlags::get(js).getCacheOptionEnabled(), Error,
         kj::str("The 'cache' field on 'RequestInitializerDict' is not implemented."));
 
     // Validate that the cache type is valid
     auto cacheMode = getCacheModeFromName(c);
-    JSG_REQUIRE(cacheMode != Request::CacheMode::NOCACHE, TypeError,
-        kj::str("Unsupported cache mode: ", c));
+
+    if (!FeatureFlags::get(js).getCacheNoCache()) {
+      JSG_REQUIRE(cacheMode != Request::CacheMode::NOCACHE, TypeError,
+          kj::str("Unsupported cache mode: ", c));
+    }
   }
 }
 
@@ -1491,7 +1500,7 @@ jsg::Ref<Response> Response::redirect(jsg::Lock& js, kj::String url, jsg::Option
   auto statusText = defaultStatusText(statusCode);
 
   return jsg::alloc<Response>(
-      js, statusCode, kj::str(statusText), kj::mv(headers), nullptr, nullptr);
+      js, statusCode, kj::str(statusText), kj::mv(headers), nullptr, kj::none);
 }
 
 jsg::Ref<Response> Response::json_(
@@ -2018,7 +2027,7 @@ jsg::Promise<jsg::Ref<Response>> handleHttpResponse(jsg::Lock& js,
       return handleHttpRedirectResponse(
           js, kj::mv(fetcher), kj::mv(jsRequest), kj::mv(urlList), response.statusCode, l);
     } else {
-      // No Location header. That's okay, we just return the response as is.
+      // No Location header. That's OK, we just return the response as is.
       // See https://fetch.spec.whatwg.org/#http-redirect-fetch step 2.
     }
   }
@@ -2439,7 +2448,7 @@ jsg::Promise<Fetcher::QueueResult> Fetcher::queue(
   auto encodedMessages = kj::heapArrayBuilder<IncomingQueueMessage>(messages.size());
   for (auto& msg: messages) {
     KJ_IF_SOME(b, msg.body) {
-      JSG_REQUIRE(msg.serializedBody == nullptr, TypeError,
+      JSG_REQUIRE(msg.serializedBody == kj::none, TypeError,
           "Expected one of body or serializedBody for each message");
       jsg::Serializer serializer(js,
           jsg::Serializer::Options{

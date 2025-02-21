@@ -13,9 +13,10 @@ import { reportError } from 'pyodide-internal:util';
  */
 import { _createPyodideModule } from 'pyodide-internal:generated/pyodide.asm';
 
-export {
+import {
   setUnsafeEval,
   setGetRandomValues,
+  finishSetup,
 } from 'pyodide-internal:pool/builtin_wrappers';
 
 /**
@@ -56,7 +57,7 @@ function getWaitForDynlibs(resolveReadyPromise: PreRunHook): PreRunHook {
  * This is a simplified version of the `prepareFileSystem` function here:
  * https://github.com/pyodide/pyodide/blob/main/src/js/module.ts
  */
-function getPrepareFileSystem(pythonStdlib: Uint8Array): PreRunHook {
+function getPrepareFileSystem(pythonStdlib: ArrayBuffer): PreRunHook {
   return function prepareFileSystem(Module: Module): void {
     try {
       const pymajor = Module._py_version_major();
@@ -118,7 +119,7 @@ function getInstantiateWasm(
  */
 function getEmscriptenSettings(
   isWorkerd: boolean,
-  pythonStdlib: Uint8Array,
+  pythonStdlib: ArrayBuffer,
   pyodideWasmModule: WebAssembly.Module
 ): EmscriptenSettings {
   const config: PyodideConfig = {
@@ -168,7 +169,7 @@ function getEmscriptenSettings(
 function* featureDetectionMonkeyPatchesContextManager() {
   const global = globalThis as any;
   // Make Emscripten think we're in the browser main thread
-  global.window = {};
+  global.window = { sessionStorage: {} };
   global.document = { createElement() {} };
   global.sessionStorage = {};
   // Make Emscripten think we're not in a worker
@@ -193,7 +194,7 @@ function* featureDetectionMonkeyPatchesContextManager() {
  */
 export async function instantiateEmscriptenModule(
   isWorkerd: boolean,
-  pythonStdlib: Uint8Array,
+  pythonStdlib: ArrayBuffer,
   wasmModule: WebAssembly.Module
 ): Promise<Module> {
   const emscriptenSettings = getEmscriptenSettings(
@@ -210,6 +211,9 @@ export async function instantiateEmscriptenModule(
 
     // Wait until we've executed all the preRun hooks before proceeding
     const emscriptenModule = await emscriptenSettings.readyPromise;
+    emscriptenModule.setUnsafeEval = setUnsafeEval;
+    emscriptenModule.setGetRandomValues = setGetRandomValues;
+    finishSetup();
     return emscriptenModule;
   } catch (e) {
     console.warn('Error in instantiateEmscriptenModule');

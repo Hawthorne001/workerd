@@ -10,6 +10,7 @@
 #include <workerd/api/actor.h>
 #include <workerd/api/analytics-engine.h>
 #include <workerd/api/cache.h>
+#include <workerd/api/container.h>
 #include <workerd/api/crypto/impl.h>
 #include <workerd/api/encoding.h>
 #include <workerd/api/events.h>
@@ -22,6 +23,7 @@
 #include <workerd/api/modules.h>
 #include <workerd/api/node/node.h>
 #include <workerd/api/pyodide/pyodide.h>
+#include <workerd/api/pyodide/setup-emscripten.h>
 #include <workerd/api/queue.h>
 #include <workerd/api/r2-admin.h>
 #include <workerd/api/r2.h>
@@ -44,6 +46,8 @@
 #include <workerd/server/actor-id-impl.h>
 #include <workerd/util/thread-scopes.h>
 #include <workerd/util/use-perfetto-categories.h>
+
+#include <pyodide/generated/pyodide_extra.capnp.h>
 
 #include <kj/compat/http.h>
 #include <kj/compat/tls.h>
@@ -81,6 +85,7 @@ JSG_DECLARE_ISOLATE_TYPE(JsgWorkerdIsolate,
     EW_BASICS_ISOLATE_TYPES,
     EW_BLOB_ISOLATE_TYPES,
     EW_CACHE_ISOLATE_TYPES,
+    EW_CONTAINER_ISOLATE_TYPES,
     EW_CRYPTO_ISOLATE_TYPES,
     EW_ENCODING_ISOLATE_TYPES,
     EW_EVENTS_ISOLATE_TYPES,
@@ -128,17 +133,107 @@ static const PythonConfig defaultConfig{
 };
 }  // namespace
 
+namespace {
+kj::Path getPyodideBundleFileName(kj::StringPtr version) {
+  return kj::Path(kj::str("pyodide_", version, ".capnp.bin"));
+}
+
+kj::Maybe<kj::Own<const kj::ReadableFile>> getPyodideBundleFile(
+    const kj::Maybe<kj::Own<const kj::Directory>>& maybeDir, kj::StringPtr version) {
+  KJ_IF_SOME(dir, maybeDir) {
+    kj::Path filename = getPyodideBundleFileName(version);
+    auto file = dir->tryOpenFile(filename);
+
+    return file;
+  }
+
+  return kj::none;
+}
+
+void writePyodideBundleFileToDisk(const kj::Maybe<kj::Own<const kj::Directory>>& maybeDir,
+    kj::StringPtr version,
+    kj::ArrayPtr<byte> bytes) {
+  KJ_IF_SOME(dir, maybeDir) {
+    kj::Path filename = getPyodideBundleFileName(version);
+    auto replacer = dir->replaceFile(filename, kj::WriteMode::CREATE | kj::WriteMode::MODIFY);
+
+    replacer->get().writeAll(bytes);
+    replacer->commit();
+  }
+}
+}  // namespace
+
+kj::Maybe<jsg::Bundle::Reader> fetchPyodideBundle(
+    const api::pyodide::PythonConfig& pyConfig, kj::StringPtr version) {
+  if (pyConfig.pyodideBundleManager.getPyodideBundle(version) != kj::none) {
+    return pyConfig.pyodideBundleManager.getPyodideBundle(version);
+  }
+
+  auto maybePyodideBundleFile = getPyodideBundleFile(pyConfig.pyodideDiskCacheRoot, version);
+  KJ_IF_SOME(pyodideBundleFile, maybePyodideBundleFile) {
+    auto body = pyodideBundleFile->readAllBytes();
+    pyConfig.pyodideBundleManager.setPyodideBundleData(kj::str(version), kj::mv(body));
+    return pyConfig.pyodideBundleManager.getPyodideBundle(version);
+  }
+
+  if (version == "dev") {
+    // the "dev" version is special and indicates we're using the tip-of-tree version built for testing
+    // so we shouldn't fetch it from the internet, only check for its existence in the disk cache
+    return kj::none;
+  }
+
+  {
+    KJ_LOG(INFO, "Loading Pyodide bundle from internet...");
+    kj::Thread([&]() {
+      kj::AsyncIoContext io = kj::setupAsyncIo();
+      kj::HttpHeaderTable table;
+
+      kj::TlsContext::Options options;
+      options.useSystemTrustStore = true;
+
+      kj::Own<kj::TlsContext> tls = kj::heap<kj::TlsContext>(kj::mv(options));
+      auto& network = io.provider->getNetwork();
+      auto tlsNetwork = tls->wrapNetwork(network);
+      auto& timer = io.provider->getTimer();
+
+      auto client = kj::newHttpClient(timer, table, network, *tlsNetwork);
+
+      kj::HttpHeaders headers(table);
+
+      // TODO: Point this at our production R2 bucket.
+      kj::String url =
+          kj::str("https://pyodide.runtime-playground.workers.dev/pyodide-capnp-bin/pyodide_",
+              version, ".capnp.bin");
+
+      auto req = client->request(kj::HttpMethod::GET, url.asPtr(), headers);
+
+      auto res = req.response.wait(io.waitScope);
+      KJ_ASSERT(res.statusCode == 200,
+          kj::str(
+              "Request for Pyodide bundle at ", url, " failed with HTTP status ", res.statusCode));
+      auto body = res.body->readAllBytes().wait(io.waitScope);
+
+      writePyodideBundleFileToDisk(pyConfig.pyodideDiskCacheRoot, version, body);
+
+      pyConfig.pyodideBundleManager.setPyodideBundleData(kj::str(version), kj::mv(body));
+    });
+  }
+
+  KJ_LOG(INFO, "Loaded Pyodide package from internet");
+  return pyConfig.pyodideBundleManager.getPyodideBundle(version);
+}
+
 struct WorkerdApi::Impl final {
   kj::Own<CompatibilityFlags::Reader> features;
   kj::Maybe<kj::Own<jsg::modules::ModuleRegistry>> maybeOwnedModuleRegistry;
-  kj::Own<IsolateLimitEnforcer> limitEnforcer;
-  kj::Own<IsolateObserver> observer;
+  kj::Own<JsgIsolateObserver> observer;
   JsgWorkerdIsolate jsgIsolate;
   api::MemoryCacheProvider& memoryCacheProvider;
   const PythonConfig& pythonConfig;
+  kj::Maybe<api::pyodide::EmscriptenRuntime> maybeEmscriptenRuntime;
 
   class Configuration {
-  public:
+   public:
     Configuration(Impl& impl)
         : features(*impl.features),
           jsgConfig(jsg::JsgConfig{
@@ -152,30 +247,37 @@ struct WorkerdApi::Impl final {
       return jsgConfig;
     }
 
-  private:
+   private:
     CompatibilityFlags::Reader& features;
     jsg::JsgConfig jsgConfig;
   };
 
   Impl(jsg::V8System& v8System,
       CompatibilityFlags::Reader featuresParam,
-      kj::Own<IsolateLimitEnforcer> limitEnforcerParam,
-      kj::Own<IsolateObserver> observerParam,
+      v8::Isolate::CreateParams createParams,
+      kj::Own<JsgIsolateObserver> observerParam,
       api::MemoryCacheProvider& memoryCacheProvider,
       const PythonConfig& pythonConfig = defaultConfig,
       kj::Maybe<kj::Own<jsg::modules::ModuleRegistry>> newModuleRegistry = kj::none)
       : features(capnp::clone(featuresParam)),
         maybeOwnedModuleRegistry(kj::mv(newModuleRegistry)),
-        limitEnforcer(kj::mv(limitEnforcerParam)),
         observer(kj::atomicAddRef(*observerParam)),
-        jsgIsolate(v8System,
-            Configuration(*this),
-            kj::mv(observerParam),
-            limitEnforcer->getCreateParams()),
+        jsgIsolate(v8System, Configuration(*this), kj::mv(observerParam), kj::mv(createParams)),
         memoryCacheProvider(memoryCacheProvider),
         pythonConfig(pythonConfig) {
-    jsgIsolate.runInLockScope(
-        [&](JsgWorkerdIsolate::Lock& lock) { limitEnforcer->customizeIsolate(lock.v8Isolate); });
+    jsgIsolate.runInLockScope([&](JsgWorkerdIsolate::Lock& lock) {
+      if (features->getPythonWorkers()) {
+        auto pythonRelease = KJ_ASSERT_NONNULL(getPythonSnapshotRelease(*features));
+        auto version = getPythonBundleName(pythonRelease);
+        auto bundle = KJ_ASSERT_NONNULL(
+            fetchPyodideBundle(pythonConfig, version), "Failed to get Pyodide bundle");
+        auto context = lock.newContext<api::ServiceWorkerGlobalScope>(lock.v8Isolate);
+        v8::Context::Scope scope(context.getHandle(lock));
+        // Init emscripten synchronously, the python script will import setup-emscripten and
+        // call setEmscriptenModele
+        maybeEmscriptenRuntime = api::pyodide::EmscriptenRuntime::initialize(lock, true, bundle);
+      }
+    });
   }
 
   static v8::Local<v8::String> compileTextGlobal(
@@ -218,14 +320,14 @@ struct WorkerdApi::Impl final {
 
 WorkerdApi::WorkerdApi(jsg::V8System& v8System,
     CompatibilityFlags::Reader features,
-    kj::Own<IsolateLimitEnforcer> limitEnforcer,
-    kj::Own<IsolateObserver> observer,
+    v8::Isolate::CreateParams createParams,
+    kj::Own<JsgIsolateObserver> observer,
     api::MemoryCacheProvider& memoryCacheProvider,
     const PythonConfig& pythonConfig,
     kj::Maybe<kj::Own<jsg::modules::ModuleRegistry>> newModuleRegistry)
     : impl(kj::heap<Impl>(v8System,
           features,
-          kj::mv(limitEnforcer),
+          kj::mv(createParams),
           kj::mv(observer),
           memoryCacheProvider,
           pythonConfig,
@@ -275,21 +377,11 @@ jsg::JsObject WorkerdApi::wrapExecutionContext(
       kj::downcast<JsgWorkerdIsolate::Lock>(lock).wrap(lock.v8Context(), kj::mv(ref)));
 }
 
-IsolateLimitEnforcer& WorkerdApi::getLimitEnforcer() {
-  return *impl->limitEnforcer;
-}
-
-const IsolateLimitEnforcer& WorkerdApi::getLimitEnforcer() const {
-  return *impl->limitEnforcer;
-}
-
-IsolateObserver& WorkerdApi::getMetrics() {
+const jsg::IsolateObserver& WorkerdApi::getObserver() const {
   return *impl->observer;
 }
 
-const IsolateObserver& WorkerdApi::getMetrics() const {
-  return *impl->observer;
-}
+void WorkerdApi::setIsolateObserver(IsolateObserver&) {};
 
 Worker::Script::Source WorkerdApi::extractSource(kj::StringPtr name,
     config::Worker::Reader conf,
@@ -436,92 +528,6 @@ kj::Maybe<jsg::ModuleRegistry::ModuleInfo> WorkerdApi::tryCompileModule(jsg::Loc
   KJ_UNREACHABLE;
 }
 
-namespace {
-kj::Path getPyodideBundleFileName(kj::StringPtr version) {
-  return kj::Path(kj::str("pyodide_", version, ".capnp.bin"));
-}
-
-kj::Maybe<kj::Own<const kj::ReadableFile>> getPyodideBundleFile(
-    const kj::Maybe<kj::Own<const kj::Directory>>& maybeDir, kj::StringPtr version) {
-  KJ_IF_SOME(dir, maybeDir) {
-    kj::Path filename = getPyodideBundleFileName(version);
-    auto file = dir->tryOpenFile(filename);
-
-    return file;
-  }
-
-  return kj::none;
-}
-
-void writePyodideBundleFileToDisk(const kj::Maybe<kj::Own<const kj::Directory>>& maybeDir,
-    kj::StringPtr version,
-    kj::ArrayPtr<byte> bytes) {
-  KJ_IF_SOME(dir, maybeDir) {
-    kj::Path filename = getPyodideBundleFileName(version);
-    auto replacer = dir->replaceFile(filename, kj::WriteMode::CREATE | kj::WriteMode::MODIFY);
-
-    replacer->get().writeAll(bytes);
-    replacer->commit();
-  }
-}
-
-kj::Maybe<jsg::Bundle::Reader> fetchPyodideBundle(
-    const api::pyodide::PythonConfig& pyConfig, kj::StringPtr version) {
-  KJ_IF_SOME(version, pyConfig.pyodideBundleManager.getPyodideBundle(version)) {
-    return version;
-  }
-
-  auto maybePyodideBundleFile = getPyodideBundleFile(pyConfig.pyodideDiskCacheRoot, version);
-  KJ_IF_SOME(pyodideBundleFile, maybePyodideBundleFile) {
-    auto body = pyodideBundleFile->readAllBytes();
-    pyConfig.pyodideBundleManager.setPyodideBundleData(kj::str(version), kj::mv(body));
-    return pyConfig.pyodideBundleManager.getPyodideBundle(version);
-  }
-
-  if (version == "dev") {
-    // the "dev" version is special and indicates we're using the tip-of-tree version built for testing
-    // so we shouldn't fetch it from the internet, only check for its existence in the disk cache
-    return kj::none;
-  }
-
-  {
-    KJ_LOG(INFO, "Loading Pyodide package from internet...");
-    kj::Thread([&]() {
-      kj::AsyncIoContext io = kj::setupAsyncIo();
-      kj::HttpHeaderTable table;
-
-      kj::TlsContext::Options options;
-      options.useSystemTrustStore = true;
-
-      kj::Own<kj::TlsContext> tls = kj::heap<kj::TlsContext>(kj::mv(options));
-      auto& network = io.provider->getNetwork();
-      auto tlsNetwork = tls->wrapNetwork(network);
-      auto& timer = io.provider->getTimer();
-
-      auto client = kj::newHttpClient(timer, table, network, *tlsNetwork);
-
-      kj::HttpHeaders headers(table);
-
-      kj::String url =
-          kj::str("https://pyodide.runtime-playground.workers.dev/pyodide-capnp-bin/pyodide_",
-              version, ".capnp.bin");
-
-      auto req = client->request(kj::HttpMethod::GET, url.asPtr(), headers);
-
-      auto res = req.response.wait(io.waitScope);
-      auto body = res.body->readAllBytes().wait(io.waitScope);
-
-      writePyodideBundleFileToDisk(pyConfig.pyodideDiskCacheRoot, version, body);
-
-      pyConfig.pyodideBundleManager.setPyodideBundleData(kj::str(version), kj::mv(body));
-    });
-  }
-
-  KJ_LOG(INFO, "Loaded Pyodide package from internet");
-  return pyConfig.pyodideBundleManager.getPyodideBundle(version);
-}
-}  // namespace
-
 void WorkerdApi::compileModules(jsg::Lock& lockParam,
     config::Worker::Reader conf,
     Worker::ValidationErrorReporter& errorReporter,
@@ -536,15 +542,18 @@ void WorkerdApi::compileModules(jsg::Lock& lockParam,
     if (hasPythonModules(confModules)) {
       KJ_REQUIRE(featureFlags.getPythonWorkers(),
           "The python_workers compatibility flag is required to use Python.");
+      // Inject SetupEmscripten module
+      modules->addBuiltinModule("internal:setup-emscripten",
+          jsg::alloc<SetupEmscripten>(KJ_ASSERT_NONNULL(impl->maybeEmscriptenRuntime)),
+          workerd::jsg::ModuleRegistry::Type::INTERNAL);
+
+      auto pythonRelease = KJ_ASSERT_NONNULL(getPythonSnapshotRelease(featureFlags));
+      auto version = getPythonBundleName(pythonRelease);
+      auto bundle = KJ_ASSERT_NONNULL(
+          fetchPyodideBundle(impl->pythonConfig, version), "Failed to get Pyodide bundle");
+
       // Inject Pyodide bundle
-      if (featureFlags.getPythonExternalBundle() ||
-          util::Autogate::isEnabled(util::AutogateKey::PYTHON_EXTERNAL_BUNDLE)) {
-        auto pythonRelease = KJ_ASSERT_NONNULL(getPythonSnapshotRelease(featureFlags));
-        auto version = getPythonBundleName(pythonRelease);
-        auto bundle = KJ_ASSERT_NONNULL(
-            fetchPyodideBundle(impl->pythonConfig, version), "Failed to get Pyodide bundle");
-        modules->addBuiltinBundle(bundle, kj::none);
-      }
+      modules->addBuiltinBundle(bundle, kj::none);
       // Inject pyodide bootstrap module (TODO: load this from the capnproto bundle?)
       {
         auto mainModule = confModules.begin();
@@ -555,87 +564,39 @@ void WorkerdApi::compileModules(jsg::Lock& lockParam,
         auto path = kj::Path::parse(mainModule->getName());
         modules->add(path, kj::mv(KJ_REQUIRE_NONNULL(info)));
       }
+
       // Inject metadata that the entrypoint module will read.
-      {
-        using ModuleInfo = jsg::ModuleRegistry::ModuleInfo;
-        using ObjectModuleInfo = jsg::ModuleRegistry::ObjectModuleInfo;
-        using ResolveMethod = jsg::ModuleRegistry::ResolveMethod;
-        auto specifier = "pyodide-internal:runtime-generated/metadata";
-        auto metadataReader = makePyodideMetadataReader(conf, impl->pythonConfig);
-        modules->addBuiltinModule(specifier,
-            [specifier = kj::str(specifier), metadataReader = kj::mv(metadataReader)](
-                jsg::Lock& js, ResolveMethod, kj::Maybe<const kj::Path&>&) mutable {
-          auto& wrapper = JsgWorkerdIsolate_TypeWrapper::from(js.v8Isolate);
-          auto wrap = wrapper.wrap(js.v8Context(), kj::none, kj::mv(metadataReader));
-          return kj::Maybe(ModuleInfo(js, specifier, kj::none, ObjectModuleInfo(js, wrap)));
-        },
-            jsg::ModuleRegistry::Type::INTERNAL);
+      modules->addBuiltinModule("pyodide-internal:runtime-generated/metadata",
+          makePyodideMetadataReader(conf, impl->pythonConfig, pythonRelease),
+          jsg::ModuleRegistry::Type::INTERNAL);
+
+      // Inject packages tar file
+      if (featureFlags.getPythonExternalPackages() ||
+          util::Autogate::isEnabled(util::AutogateKey::PYTHON_FETCH_INDIVIDUAL_PACKAGES)) {
+        modules->addBuiltinModule("pyodide-internal:packages_tar_reader", "export default { }"_kj,
+            workerd::jsg::ModuleRegistry::Type::INTERNAL, {});
+      } else {
+        modules->addBuiltinModule("pyodide-internal:packages_tar_reader",
+            jsg::alloc<ReadOnlyBuffer>(PYODIDE_PACKAGES_TAR.get()),
+            workerd::jsg::ModuleRegistry::Type::INTERNAL);
       }
+
       // Inject artifact bundler.
-      {
-        using ModuleInfo = jsg::ModuleRegistry::ModuleInfo;
-        using ObjectModuleInfo = jsg::ModuleRegistry::ObjectModuleInfo;
-        using ResolveMethod = jsg::ModuleRegistry::ResolveMethod;
-        auto specifier = "pyodide-internal:artifacts";
-        modules->addBuiltinModule(specifier,
-            [specifier = kj::str(specifier)](
-                jsg::Lock& js, ResolveMethod, kj::Maybe<const kj::Path&>&) mutable {
-          auto& wrapper = JsgWorkerdIsolate_TypeWrapper::from(js.v8Isolate);
-          auto wrap =
-              wrapper.wrap(js.v8Context(), kj::none, ArtifactBundler::makeDisabledBundler());
-          return kj::Maybe(ModuleInfo(js, specifier, kj::none, ObjectModuleInfo(js, wrap)));
-        },
-            jsg::ModuleRegistry::Type::INTERNAL);
-      }
+      modules->addBuiltinModule("pyodide-internal:artifacts",
+          ArtifactBundler::makeDisabledBundler(), jsg::ModuleRegistry::Type::INTERNAL);
 
       // Inject jaeger internal tracer in a disabled state (we don't have a use for it in workerd)
-      {
-        using ModuleInfo = jsg::ModuleRegistry::ModuleInfo;
-        using ObjectModuleInfo = jsg::ModuleRegistry::ObjectModuleInfo;
-        using ResolveMethod = jsg::ModuleRegistry::ResolveMethod;
-        auto specifier = "pyodide-internal:internalJaeger";
-        modules->addBuiltinModule(specifier,
-            [specifier = kj::str(specifier)](
-                jsg::Lock& js, ResolveMethod, kj::Maybe<const kj::Path&>&) mutable {
-          auto& wrapper = JsgWorkerdIsolate_TypeWrapper::from(js.v8Isolate);
-          auto wrap = wrapper.wrap(js.v8Context(), kj::none, DisabledInternalJaeger::create());
-          return kj::Maybe(ModuleInfo(js, specifier, kj::none, ObjectModuleInfo(js, wrap)));
-        },
-            jsg::ModuleRegistry::Type::INTERNAL);
-      }
+      modules->addBuiltinModule("pyodide-internal:internalJaeger", DisabledInternalJaeger::create(),
+          jsg::ModuleRegistry::Type::INTERNAL);
 
       // Inject disk cache module
-      {
-        using ModuleInfo = jsg::ModuleRegistry::ModuleInfo;
-        using ObjectModuleInfo = jsg::ModuleRegistry::ObjectModuleInfo;
-        using ResolveMethod = jsg::ModuleRegistry::ResolveMethod;
-        auto specifier = "pyodide-internal:disk_cache";
-        auto diskCache = jsg::alloc<DiskCache>(impl->pythonConfig.packageDiskCacheRoot);
-        modules->addBuiltinModule(specifier,
-            [specifier = kj::str(specifier), diskCache = kj::mv(diskCache)](
-                jsg::Lock& js, ResolveMethod, kj::Maybe<const kj::Path&>&) mutable {
-          auto& wrapper = JsgWorkerdIsolate_TypeWrapper::from(js.v8Isolate);
-          auto wrap = wrapper.wrap(js.v8Context(), kj::none, kj::mv(diskCache));
-          return kj::Maybe(ModuleInfo(js, specifier, kj::none, ObjectModuleInfo(js, wrap)));
-        },
-            jsg::ModuleRegistry::Type::INTERNAL);
-      }
+      modules->addBuiltinModule("pyodide-internal:disk_cache",
+          jsg::alloc<DiskCache>(impl->pythonConfig.packageDiskCacheRoot),
+          jsg::ModuleRegistry::Type::INTERNAL);
 
       // Inject a (disabled) SimplePythonLimiter
-      {
-        using ModuleInfo = jsg::ModuleRegistry::ModuleInfo;
-        using ObjectModuleInfo = jsg::ModuleRegistry::ObjectModuleInfo;
-        using ResolveMethod = jsg::ModuleRegistry::ResolveMethod;
-        auto specifier = "pyodide-internal:limiter";
-        modules->addBuiltinModule(specifier,
-            [specifier = kj::str(specifier)](
-                jsg::Lock& js, ResolveMethod, kj::Maybe<const kj::Path&>&) mutable {
-          auto& wrapper = JsgWorkerdIsolate_TypeWrapper::from(js.v8Isolate);
-          auto wrap = wrapper.wrap(js.v8Context(), kj::none, SimplePythonLimiter::makeDisabled());
-          return kj::Maybe(ModuleInfo(js, specifier, kj::none, ObjectModuleInfo(js, wrap)));
-        },
-            jsg::ModuleRegistry::Type::INTERNAL);
-      }
+      modules->addBuiltinModule("pyodide-internal:limiter", SimplePythonLimiter::makeDisabled(),
+          jsg::ModuleRegistry::Type::INTERNAL);
     }
 
     for (auto module: confModules) {
@@ -648,7 +609,7 @@ void WorkerdApi::compileModules(jsg::Lock& lockParam,
 
     api::registerModules(*modules, featureFlags);
 
-    // todo(perf): we'd like to find a way to precompile these on server startup and use isolate
+    // TODO(perf): we'd like to find a way to precompile these on server startup and use isolate
     // cloning for faster worker creation.
     for (auto extension: extensions) {
       for (auto module: extension.getModules()) {
@@ -1033,12 +994,15 @@ kj::Own<jsg::modules::ModuleRegistry> WorkerdApi::initializeBundleModuleRegistry
     auto diskCacheSpecifier = "pyodide-internal:disk_cache"_url;
     auto limiterSpecifier = "pyodide-internal:limiter"_url;
 
+    auto pythonRelease = KJ_ASSERT_NONNULL(getPythonSnapshotRelease(featureFlags));
     // Inject metadata that the entrypoint module will read.
     pyodideBundleBuilder.addSynthetic(metadataSpecifier,
         jsg::modules::Module::newJsgObjectModuleHandler<PyodideMetadataReader,
             JsgWorkerdIsolate_TypeWrapper>(
-            [metadataReader = makePyodideMetadataReader(conf, pythonConfig)](jsg::Lock& js) mutable
-            -> jsg::Ref<PyodideMetadataReader> { return metadataReader.addRef(); }));
+            [metadataReader = makePyodideMetadataReader(conf, pythonConfig, pythonRelease)](
+                jsg::Lock& js) mutable -> jsg::Ref<PyodideMetadataReader> {
+      return metadataReader.addRef();
+    }));
     // Inject artifact bundler.
     pyodideBundleBuilder.addSynthetic(artifactsSpecifier,
         jsg::modules::Module::newJsgObjectModuleHandler<ArtifactBundler,

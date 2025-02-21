@@ -15,6 +15,11 @@ interface API {
   finalizeBootstrap: () => void;
   public_api: Pyodide;
   rawRun: (code: string) => [status: number, err: string];
+  initializeStreams: (
+    stdin?: any,
+    stdout?: (a: string) => void,
+    stderr?: (a: string) => void
+  ) => void;
 }
 
 interface LDSO {
@@ -68,4 +73,8 @@ interface Module {
   addRunDependency(x: string): void;
   removeRunDependency(x: string): void;
   noInitialRun: boolean;
+  setUnsafeEval(mod: typeof import('internal:unsafe-eval').default): void;
+  setGetRandomValues(
+    func: typeof import('pyodide-internal:topLevelEntropy/lib').getRandomValues
+  ): void;
 }

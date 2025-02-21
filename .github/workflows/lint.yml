@@ -2,9 +2,16 @@ name: Lint
 
 on:
   pull_request:
+  merge_group:
   push:
     branches:
-    - main
+      - main
+    paths-ignore:
+      - 'docs/**'
+      - 'justfile'
+      - '.devcontainer'
+      - '**/*.md'
+      - '.gitignore'
 
 concurrency:
   # Cancel existing builds for the same PR.

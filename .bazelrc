@@ -2,6 +2,7 @@ common --enable_platform_specific_config
 build --verbose_failures
 build --build_tag_filters=-off-by-default
 test --test_tag_filters=-off-by-default
+test:asan --test_tag_filters=-off-by-default,-no-asan
 # exclude enormous tests by default
 build --test_size_filters=-enormous
 
@@ -56,8 +57,8 @@ build --per_file_copt='external@-Wno-error'
 build --per_file_copt='external/v8@-Wno-deprecated-declarations'
 build --per_file_copt='external/com_googlesource_chromium_icu@-Wno-ambiguous-reversed-operator,-Wno-deprecated-declarations'
 build --host_per_file_copt='external/com_googlesource_chromium_icu@-Wno-ambiguous-reversed-operator,-Wno-deprecated-declarations'
-build --per_file_copt='external/dawn@-Wno-shorten-64-to-32,-Wno-unneeded-internal-declaration'
-build --host_per_file_copt='external/dawn@-Wno-shorten-64-to-32,-Wno-unneeded-internal-declaration'
+build --per_file_copt='external/dawn@-Wno-shorten-64-to-32,-Wno-unneeded-internal-declaration,-Wno-deprecated-this-capture'
+build --host_per_file_copt='external/dawn@-Wno-shorten-64-to-32,-Wno-unneeded-internal-declaration,-Wno-deprecated-this-capture'
 build --per_file_copt='external/zlib@-Wno-unknown-warning-option,-Wno-deprecated-non-prototype'
 build --host_per_file_copt='external/zlib@-Wno-unknown-warning-option,-Wnodeprecated-non-prototype'
 # for some reason tcmalloc uses internal msan-enabled annotation in the code, rather than public one
@@ -65,16 +66,26 @@ build --per_file_copt=external/com_google_tcmalloc@-DANNOTATE_MEMORY_IS_INITIALI
 build --per_file_copt=external/com_google_protobuf@-Wno-deprecated-declarations,-Wno-deprecated-pragma,-Wno-deprecated-this-capture
 build --host_per_file_copt=external/com_google_protobuf@-Wno-deprecated-declarations,-Wno-deprecated-pragma,-Wno-deprecated-this-capture
 
-# Increasing the optimization level of some portions of V8 significantly speeds up Python tests
-# in GitHub Actions. This is an optional performance hack and shouly only be used in CI.
-build:v8-codegen-opt --per_file_copt=v8/src/compiler@-O2
-build:v8-codegen-opt --per_file_copt=v8/src/common@-O2
-build:v8-codegen-opt --per_file_copt=v8/src/builtins@-O2
-build:v8-codegen-opt --per_file_copt=v8/src/heap@-O2
-build:v8-codegen-opt --per_file_copt=v8/src/snapshot@-O2
-build:v8-codegen-opt --per_file_copt=v8/src/objects@-O2
-build:v8-codegen-opt --per_file_copt=v8/src/wasm@-O2
+# Increasing the optimization level of some portions of V8 significantly speeds up Python tests in
+# GitHub Actions. This is an optional performance hack intended for CI, although it might also be
+# useful for local development.
+build:v8-codegen-opt --per_file_copt=v8/src/api@-O2
 build:v8-codegen-opt --per_file_copt=v8/src/base@-O2
+build:v8-codegen-opt --per_file_copt=v8/src/builtins@-O2
+build:v8-codegen-opt --per_file_copt=v8/src/codegen@-O2
+build:v8-codegen-opt --per_file_copt=v8/src/common@-O2
+build:v8-codegen-opt --per_file_copt=v8/src/compiler@-O2
+build:v8-codegen-opt --per_file_copt=v8/src/execution@-O2
+build:v8-codegen-opt --per_file_copt=v8/src/heap@-O2
+build:v8-codegen-opt --per_file_copt=v8/src/objects@-O2
+build:v8-codegen-opt --per_file_copt=v8/src/parsing@-O2
+build:v8-codegen-opt --per_file_copt=v8/src/roots@-O2
+build:v8-codegen-opt --per_file_copt=v8/src/runtime@-O2
+build:v8-codegen-opt --per_file_copt=v8/src/parsing@-O2
+build:v8-codegen-opt --per_file_copt=v8/src/snapshot@-O2
+build:v8-codegen-opt --per_file_copt=v8/src/wasm@-O2
+# V8 is heavily using absl for hashing now, optimize it too.
+build:v8-codegen-opt --per_file_copt=external/com_google_absl@-O2
 
 # Disable relaxing all jumps during LLVM codegen under -O0, which previously led to build
 # performance improvements but makes code size worse. This will be the default in LLVM19.
@@ -152,13 +163,10 @@ build --cxxopt="-fbracket-depth=512" --host_cxxopt="-fbracket-depth=512"
 build --@capnp-cpp//src/capnp:gen_rust=True
 
 # Additional Rust flags (see https://doc.rust-lang.org/rustc/codegen-options/index.html)
-# Need to disable debug-assertions for fastbuild, should be off automatically for opt. As long as
-# rust-level LTO is not enabled, LLVM bitcode is not needed so -C embed-bitcode=n provides a free
-# improvement to build speed and Rust code size.
+# Need to disable debug-assertions for fastbuild, should be off automatically for opt.
 # Using extra_rustc_flag for non-exec flags so they can be overwritten selectively.
-build --@rules_rust//:extra_rustc_flag=-Cembed-bitcode=n
 build --@rules_rust//:extra_rustc_flag=-Cdebug-assertions=n
-build --@rules_rust//:extra_exec_rustc_flags=-C,debug-assertions=n,-C,embed-bitcode=n
+build --@rules_rust//:extra_exec_rustc_flags=-Cdebug-assertions=n
 
 # We default to not enabling debug assertions and unwinding for Rust. For debug builds this is not
 # the right setting, but unfortunately we can't set that directly.
@@ -340,6 +348,10 @@ build:release_macos --config=release_unix
 build:release_macos --linkopt="-Wl,-no_data_in_code_info"
 build:release_macos --linkopt="-Wl,-no_function_starts"
 
+# Cross-compiled release build for x86_64.
+build:release_macos_cross_x86_64 --config=release_macos
+build:release_macos_cross_x86_64 --config=macos-cross-x86_64
+
 # On macOS, optionally compile using LLD (19 or higher is compatible with the default flags added by
 # apple_support). Requires Homebrew's lld package to be installed and symlinked into /usr/local/bin.
 # This is less CPU intensive than the system linker, but also slightly slower in terms of wall time
@@ -364,7 +376,7 @@ build:release_windows --copt="-fstrict-aliasing"
 build:windows --cxxopt='/std:c++20' --host_cxxopt='/std:c++20'
 build:windows --copt='/D_CRT_USE_BUILTIN_OFFSETOF' --host_copt='/D_CRT_USE_BUILTIN_OFFSETOF'
 build:windows --copt='/DWIN32_LEAN_AND_MEAN' --host_copt='/DWIN32_LEAN_AND_MEAN'
-# The `/std:c++20` argument is unused during boringssl compilation and we don't
+# The `/std:c++20` argument is unused during BoringSSL compilation and we don't
 # want a warning when compiling each file.
 build:windows --copt='-Wno-unused-command-line-argument' --host_copt='-Wno-unused-command-line-argument'
 

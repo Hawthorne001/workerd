@@ -13,8 +13,8 @@ namespace workerd::api {
 
 namespace {
 class TextEncoderStreamController: public kj::Refcounted {
-public:
-private:
+ public:
+ private:
   jsg::Ref<TextEncoder> encoder = jsg::alloc<TextEncoder>();
 };
 }  // namespace
@@ -24,17 +24,15 @@ jsg::Ref<TextEncoderStream> TextEncoderStream::constructor(jsg::Lock& js) {
       Transformer{.transform = jsg::Function<Transformer::TransformAlgorithm>(
                       [](jsg::Lock& js, auto chunk, auto controller) {
     auto str = jsg::check(chunk->ToString(js.v8Context()));
-    auto maybeBuffer = v8::ArrayBuffer::MaybeNew(js.v8Isolate, str->Utf8Length(js.v8Isolate));
+    auto maybeBuffer = v8::ArrayBuffer::MaybeNew(js.v8Isolate, str->Utf8LengthV2(js.v8Isolate));
     JSG_ASSERT(!maybeBuffer.IsEmpty(), RangeError, "Cannot allocate space for TextEncoder.encode");
     auto buffer = maybeBuffer.ToLocalChecked();
 
     auto bytes = jsg::asBytes(buffer).releaseAsChars();
-    [[maybe_unused]] int read = 0;
-    [[maybe_unused]] auto written = str->WriteUtf8(js.v8Isolate, bytes.begin(), bytes.size(), &read,
-        v8::String::NO_NULL_TERMINATION | v8::String::REPLACE_INVALID_UTF8);
+    [[maybe_unused]] auto written = str->WriteUtf8V2(
+        js.v8Isolate, bytes.begin(), bytes.size(), v8::String::WriteFlags::kReplaceInvalidUtf8);
 
     KJ_DASSERT(written == buffer->ByteLength());
-    KJ_DASSERT(read == str->Length());
     controller->enqueue(js, v8::Uint8Array::New(buffer, 0, buffer->ByteLength()));
     return js.resolvedPromise();
   })},

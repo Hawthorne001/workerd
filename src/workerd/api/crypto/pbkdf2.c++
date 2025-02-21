@@ -3,17 +3,17 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "impl.h"
+#include "kdf.h"
 
-#include <workerd/api/crypto/kdf.h>
-
-#include <openssl/evp.h>
-#include <openssl/mem.h>
+#include <ncrypto.h>
 
 namespace workerd::api {
 namespace {
 
+// The underlying implementation of PBKDF2 for WebCrypto.
+// The CryptoKey::Impl here is used only for web crypto uses.
 class Pbkdf2Key final: public CryptoKey::Impl {
-public:
+ public:
   explicit Pbkdf2Key(kj::Array<kj::byte> keyData,
       CryptoKey::KeyAlgorithm keyAlgorithm,
       bool extractable,
@@ -33,8 +33,8 @@ public:
     tracker.trackField("keyAlgorithm", keyAlgorithm);
   }
 
-private:
-  kj::Array<kj::byte> deriveBits(jsg::Lock& js,
+ private:
+  jsg::BufferSource deriveBits(jsg::Lock& js,
       SubtleCrypto::DeriveKeyAlgorithm&& algorithm,
       kj::Maybe<uint32_t> maybeLength) const override {
     kj::StringPtr hashName = api::getAlgorithmName(
@@ -63,13 +63,13 @@ private:
     // wisest.
     checkPbkdfLimits(js, iterations);
 
-    return JSG_REQUIRE_NONNULL(pbkdf2(length / 8, iterations, hashType, keyData, salt), Error,
+    return JSG_REQUIRE_NONNULL(pbkdf2(js, length / 8, iterations, hashType, keyData, salt), Error,
         "PBKDF2 deriveBits failed.");
   }
 
   // TODO(bug): Possibly by mistake, PBKDF2 was historically not on the allow list of
   //   algorithms in exportKey(). Later, the allow list was removed, instead assuming that any
-  //   alogorithm which implemented this method must be allowed. To maintain exactly the
+  //   algorithm which implemented this method must be allowed. To maintain exactly the
   //   preexisting behavior, then, this implementation had to be commented out. If disallowing this
   //   was a mistake, we can un-comment this method, but we would need to make sure to add tests
   //   when we do.
@@ -98,20 +98,22 @@ private:
   ZeroOnFree keyData;
   CryptoKey::KeyAlgorithm keyAlgorithm;
 };
-
 }  // namespace
 
-kj::Maybe<kj::Array<kj::byte>> pbkdf2(size_t length,
+kj::Maybe<jsg::BufferSource> pbkdf2(jsg::Lock& js,
+    size_t length,
     size_t iterations,
     const EVP_MD* digest,
     kj::ArrayPtr<const kj::byte> password,
     kj::ArrayPtr<const kj::byte> salt) {
-  auto buf = kj::heapArray<kj::byte>(length);
-  if (PKCS5_PBKDF2_HMAC(password.asChars().begin(), password.size(), salt.begin(), salt.size(),
-          iterations, digest, length, buf.begin()) != 1) {
-    return kj::none;
+  ncrypto::ClearErrorOnReturn clearErrorOnReturn;
+  auto backing = jsg::BackingStore::alloc<v8::ArrayBuffer>(js, length);
+  auto buf = ToNcryptoBuffer(backing.asArrayPtr());
+  if (ncrypto::pbkdf2Into(digest, ToNcryptoBuffer(password.asChars()), ToNcryptoBuffer(salt),
+          iterations, length, &buf)) {
+    return jsg::BufferSource(js, kj::mv(backing));
   }
-  return kj::mv(buf);
+  return kj::none;
 }
 
 kj::Own<CryptoKey::Impl> CryptoKey::Impl::importPbkdf2(jsg::Lock& js,

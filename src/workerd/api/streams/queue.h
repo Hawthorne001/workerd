@@ -8,7 +8,7 @@
 
 #include <workerd/jsg/jsg.h>
 
-#include <deque>
+#include <list>
 #include <set>
 
 namespace workerd::api {
@@ -64,7 +64,7 @@ namespace workerd::api {
 //    consume some amount of data from the internal data buffer. If there is
 //    enough data in the internal buffer to immediately fulfill the read request
 //    when it is received, then we do so. Otherwise, the read is moved into the
-//    pending reads list and is fullfilled later once there is enough data provided
+//    pending reads list and is fulfilled later once there is enough data provided
 //    to the consumer to do so.
 //
 //  - When data is provided to a consumer by the queue, that data is added to
@@ -147,7 +147,7 @@ class QueueImpl;
 // Provides the underlying implementation shared by ByteQueue and ValueQueue.
 template <typename Self>
 class QueueImpl final {
-public:
+ public:
   using ConsumerImpl = ConsumerImpl<Self>;
   using Entry = typename Self::Entry;
   using State = typename Self::State;
@@ -278,7 +278,7 @@ public:
   inline size_t jsgGetMemorySelfSize() const;
   inline void jsgGetMemoryInfo(jsg::MemoryTracker& tracker) const;
 
-private:
+ private:
   struct Closed {};
   using Errored = jsg::Value;
 
@@ -310,7 +310,7 @@ private:
 // Provides the underlying implementation shared by ByteQueue::Consumer and ValueQueue::Consumer
 template <typename Self>
 class ConsumerImpl final {
-public:
+ public:
   struct StateListener {
     virtual void onConsumerClose(jsg::Lock& js) = 0;
     virtual void onConsumerError(jsg::Lock& js, jsg::Value reason) = 0;
@@ -518,14 +518,14 @@ public:
     KJ_SWITCH_ONEOF(state) {
       KJ_CASE_ONEOF(closed, Closed) {}
       KJ_CASE_ONEOF(errored, Errored) {
-        // Technically we shouldn't really have to gc visit the stored error here but there
+        // Technically we shouldn't really have to GC visit the stored error here but there
         // should not be any harm in doing so.
         visitor.visit(errored);
       }
       KJ_CASE_ONEOF(ready, Ready) {
-        // There's no reason to gc visit the promise resolver or buffer here and it is
+        // There's no reason to GC visit the promise resolver or buffer here and it is
         // potentially problematic if we do. Since the read requests are queued, if we
-        // gc visit it once, remove it from the queue, and gc happens to kick in before
+        // GC visit it once, remove it from the queue, and GC happens to kick in before
         // we access the resolver, then v8 could determine that the resolver or buffered
         // entries are no longer reachable via tracing and free them before we can
         // actually try to access the held resolver.
@@ -537,15 +537,17 @@ public:
   inline size_t jsgGetMemorySelfSize() const;
   inline void jsgGetMemoryInfo(jsg::MemoryTracker& tracker) const;
 
-private:
+ private:
   // A sentinel used in the buffer to signal that close() has been called.
   struct Close {};
 
   struct Closed {};
   using Errored = jsg::Value;
   struct Ready {
-    std::deque<kj::OneOf<QueueEntry, Close>> buffer;
-    std::deque<ReadRequest> readRequests;
+    // We use std::list to keep memory overhead low when there are many streams with no or few
+    // pending entries/reads.
+    std::list<kj::OneOf<QueueEntry, Close>> buffer;
+    std::list<ReadRequest> readRequests;
     size_t queueTotalSize = 0;
 
     inline kj::StringPtr jsgGetMemoryName() const;
@@ -632,7 +634,7 @@ private:
 // Value queue
 
 class ValueQueue final {
-public:
+ public:
   using ConsumerImpl = ConsumerImpl<ValueQueue>;
   using QueueImpl = QueueImpl<ValueQueue>;
 
@@ -655,7 +657,7 @@ public:
   // A value queue entry consists of an arbitrary JavaScript value and a size that is
   // calculated by the size algorithm function provided in the stream constructor.
   class Entry {
-  public:
+   public:
     explicit Entry(jsg::Value value, size_t size);
     KJ_DISALLOW_COPY_AND_MOVE(Entry);
 
@@ -671,7 +673,7 @@ public:
       tracker.trackField("value", value);
     }
 
-  private:
+   private:
     jsg::Value value;
     size_t size;
   };
@@ -686,7 +688,7 @@ public:
   };
 
   class Consumer final {
-  public:
+   public:
     Consumer(ValueQueue& queue, kj::Maybe<ConsumerImpl::StateListener&> stateListener = kj::none);
     Consumer(QueueImpl& queue, kj::Maybe<ConsumerImpl::StateListener&> stateListener = kj::none);
     Consumer(Consumer&&) = delete;
@@ -722,7 +724,7 @@ public:
     inline size_t jsgGetMemorySelfSize() const;
     inline void jsgGetMemoryInfo(jsg::MemoryTracker& tracker) const;
 
-  private:
+   private:
     ConsumerImpl impl;
 
     friend class ValueQueue;
@@ -754,7 +756,7 @@ public:
   inline size_t jsgGetMemorySelfSize() const;
   inline void jsgGetMemoryInfo(jsg::MemoryTracker& tracker) const;
 
-private:
+ private:
   QueueImpl impl;
 
   static void handlePush(
@@ -774,7 +776,7 @@ private:
 // Byte queue
 
 class ByteQueue final {
-public:
+ public:
   using ConsumerImpl = ConsumerImpl<ByteQueue>;
   using QueueImpl = QueueImpl<ByteQueue>;
 
@@ -822,7 +824,7 @@ public:
   // the BYOB read request. Once either of those are called, or once invalidate() is called,
   // the ByobRequest is no longer usable and should be discarded.
   class ByobRequest final {
-  public:
+   public:
     ByobRequest(ReadRequest& request, ConsumerImpl& consumer, QueueImpl& queue)
         : request(request),
           consumer(consumer),
@@ -856,14 +858,16 @@ public:
 
     JSG_MEMORY_INFO(ByteQueue::ByobRequest) {}
 
-  private:
+   private:
     kj::Maybe<ReadRequest&> request;
     ConsumerImpl& consumer;
     QueueImpl& queue;
   };
 
   struct State {
-    std::deque<kj::Own<ByobRequest>> pendingByobReadRequests;
+    // We use std::list to keep memory overhead low when there are many streams with no or few
+    // pending reads.
+    std::list<kj::Own<ByobRequest>> pendingByobReadRequests;
 
     JSG_MEMORY_INFO(ByteQueue::State) {
       for (auto& request: pendingByobReadRequests) {
@@ -875,7 +879,7 @@ public:
   // A byte queue entry consists of a jsg::BufferSource containing a non-zero-length
   // sequence of bytes. The size is determined by the number of bytes in the entry.
   class Entry {
-  public:
+   public:
     explicit Entry(jsg::BufferSource store);
 
     kj::ArrayPtr<kj::byte> toArrayPtr();
@@ -890,7 +894,7 @@ public:
       tracker.trackField("store", store);
     }
 
-  private:
+   private:
     jsg::BufferSource store;
   };
 
@@ -906,7 +910,7 @@ public:
   };
 
   class Consumer {
-  public:
+   public:
     Consumer(ByteQueue& queue, kj::Maybe<ConsumerImpl::StateListener&> stateListener = kj::none);
     Consumer(QueueImpl& queue, kj::Maybe<ConsumerImpl::StateListener&> stateListener = kj::none);
     Consumer(Consumer&&) = delete;
@@ -941,7 +945,7 @@ public:
     inline size_t jsgGetMemorySelfSize() const;
     inline void jsgGetMemoryInfo(jsg::MemoryTracker& tracker) const;
 
-  private:
+   private:
     ConsumerImpl impl;
   };
 
@@ -981,7 +985,7 @@ public:
   inline size_t jsgGetMemorySelfSize() const;
   inline void jsgGetMemoryInfo(jsg::MemoryTracker& tracker) const;
 
-private:
+ private:
   QueueImpl impl;
 
   static void handlePush(

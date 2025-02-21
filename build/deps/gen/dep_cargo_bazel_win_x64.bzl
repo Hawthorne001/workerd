@@ -2,9 +2,9 @@
 
 load("@//:build/http.bzl", "http_file")
 
-TAG_NAME = "0.54.1"
-URL = "https://github.com/bazelbuild/rules_rust/releases/download/0.54.1/cargo-bazel-x86_64-pc-windows-msvc.exe"
-SHA256 = "609e894dc52576407afd5edf3b293eab2774e4fffc25ae212ab138556ff7306d"
+TAG_NAME = "0.57.1"
+URL = "https://github.com/bazelbuild/rules_rust/releases/download/0.57.1/cargo-bazel-x86_64-pc-windows-msvc.exe"
+SHA256 = "a37a9dabeb93e7c7b65e3175856e9e8e05f18e0a11b91cc9652920b4052c74ae"
 
 def dep_cargo_bazel_win_x64():
     http_file(

@@ -10,6 +10,8 @@
 #include <workerd/jsg/jsg.h>
 #include <workerd/util/weak-refs.h>
 
+#include <list>
+
 namespace workerd::api {
 
 // =======================================================================================
@@ -130,7 +132,7 @@ class WritableStreamJsController;
 // ReadableStreamDefaultController and the ReadableByteStreamController.
 template <class Self>
 class ReadableImpl {
-public:
+ public:
   using Consumer = typename Self::QueueType::Consumer;
   using Entry = typename Self::QueueType::Entry;
   using StateListener = typename Self::QueueType::ConsumerImpl::StateListener;
@@ -187,7 +189,7 @@ public:
   size_t jsgGetMemorySelfSize() const;
   void jsgGetMemoryInfo(jsg::MemoryTracker& tracker) const;
 
-private:
+ private:
   struct Algorithms {
     kj::Maybe<jsg::Function<UnderlyingSource::StartAlgorithm>> start;
     kj::Maybe<jsg::Function<UnderlyingSource::PullAlgorithm>> pull;
@@ -246,7 +248,7 @@ private:
 // controllers be introduced.
 template <class Self>
 class WritableImpl {
-public:
+ public:
   using PendingAbort = WritableStreamController::PendingAbort;
 
   struct WriteRequest {
@@ -311,7 +313,7 @@ public:
   // is equal to or above the highwatermark, then backpressure is applied.
   void updateBackpressure(jsg::Lock& js);
 
-  // Writes a chunk to the Writable, possibly queueing the chunk in the internal buffer
+  // Writes a chunk to the Writable, possibly queuing the chunk in the internal buffer
   // if there are already other writes pending.
   jsg::Promise<void> write(jsg::Lock& js, jsg::Ref<Self> self, v8::Local<v8::Value> value);
 
@@ -326,7 +328,7 @@ public:
   size_t jsgGetMemorySelfSize() const;
   void jsgGetMemoryInfo(jsg::MemoryTracker& tracker) const;
 
-private:
+ private:
   struct Algorithms {
     kj::Maybe<jsg::Function<UnderlyingSink::AbortAlgorithm>> abort;
     kj::Maybe<jsg::Function<UnderlyingSink::CloseAlgorithm>> close;
@@ -352,7 +354,7 @@ private:
   struct Writable {};
 
   // Sadly, we have to use a weak ref here rather than jsg::Ref. This is because
-  // the jsg::Ref<WritableStream> (via it's internal WritableStreamJsController)
+  // the jsg::Ref<WritableStream> (via its internal WritableStreamJsController)
   // holds a strong reference to the jsg::Ref<WritableStreamDefaultController> that
   // uses this WritableImpl. This creates a strong circular reference between jsg::Refs
   // that isn't allowed. GcTracing ends up with a stack overflow as the two jsg::Refs
@@ -367,7 +369,9 @@ private:
   bool backpressure = false;
   size_t highWaterMark = 1;
 
-  std::deque<WriteRequest> writeRequests;
+  // `writeRequests` is often going to be empty in common usage patterns, in which case std::list
+  // is more memory efficient than a std::deque, for example.
+  std::list<WriteRequest> writeRequests;
   size_t amountBuffered = 0;
   bool warnAboutExcessiveBackpressure = true;
   size_t excessiveBackpressureWarningCount = 0;
@@ -375,7 +379,7 @@ private:
   kj::Maybe<WriteRequest> inFlightWrite;
   kj::Maybe<jsg::Promise<void>::Resolver> inFlightClose;
   kj::Maybe<jsg::Promise<void>::Resolver> closeRequest;
-  kj::Maybe<PendingAbort> maybePendingAbort;
+  kj::Maybe<kj::Own<PendingAbort>> maybePendingAbort;
 
   friend Self;
 };
@@ -386,7 +390,7 @@ private:
 // It is capable of streaming any JavaScript value through it, including typed arrays and
 // array buffers, but treats all values as opaque. BYOB reads are not supported.
 class ReadableStreamDefaultController: public jsg::Object {
-public:
+ public:
   using QueueType = ValueQueue;
   using ReadableImpl = ReadableImpl<ReadableStreamDefaultController>;
 
@@ -429,7 +433,7 @@ public:
 
   kj::Maybe<StreamStates::Errored> getMaybeErrorState(jsg::Lock& js);
 
-private:
+ private:
   kj::Maybe<IoContext&> ioContext;
   ReadableImpl impl;
 
@@ -450,7 +454,7 @@ private:
 // dictated by the streams specification since the class name is used as the exported
 // object name.
 class ReadableStreamBYOBRequest: public jsg::Object {
-public:
+ public:
   ReadableStreamBYOBRequest(jsg::Lock& js,
       kj::Own<ByteQueue::ByobRequest> readRequest,
       jsg::Ref<ReadableByteStreamController> controller);
@@ -484,7 +488,7 @@ public:
 
   void visitForMemoryInfo(jsg::MemoryTracker& tracker) const;
 
-private:
+ private:
   struct Impl {
     kj::Own<ByteQueue::ByobRequest> readRequest;
     jsg::Ref<ReadableByteStreamController> controller;
@@ -507,7 +511,7 @@ private:
 // It is capable of only streaming byte data through it in the form of typed arrays.
 // BYOB reads are supported.
 class ReadableByteStreamController: public jsg::Object {
-public:
+ public:
   using QueueType = ByteQueue;
   using ReadableImpl = ReadableImpl<ReadableByteStreamController>;
 
@@ -548,7 +552,7 @@ public:
     tracker.trackField("maybeByobRequest", maybeByobRequest);
   }
 
-private:
+ private:
   kj::Maybe<IoContext&> ioContext;
   ReadableImpl impl;
   kj::Maybe<jsg::Ref<ReadableStreamBYOBRequest>> maybeByobRequest;
@@ -566,7 +570,7 @@ private:
 // to determine whether it is capable of handling whatever type of JavaScript object it
 // is given.
 class WritableStreamDefaultController: public jsg::Object {
-public:
+ public:
   using WritableImpl = WritableImpl<WritableStreamDefaultController>;
 
   explicit WritableStreamDefaultController(WritableStream& owner);
@@ -600,7 +604,7 @@ public:
 
   void cancelPendingWrites(jsg::Lock& js, jsg::JsValue reason);
 
-private:
+ private:
   kj::Maybe<IoContext&> ioContext;
   WritableImpl impl;
 
@@ -616,9 +620,9 @@ private:
 // JSG_VISITABLE_LAMBDAs. When those algorithms are cleared, the strong
 // references holding the TransformStreamDefaultController are freed.
 // However, user code can do silly things like hold the Transform controller
-// long after both the readable and writable sides have been gc'd.
+// long after both the readable and writable sides have been GC'ed.
 class TransformStreamDefaultController: public jsg::Object {
-public:
+ public:
   TransformStreamDefaultController(jsg::Lock& js);
 
   void init(jsg::Lock& js,
@@ -660,7 +664,7 @@ public:
 
   void visitForMemoryInfo(jsg::MemoryTracker& tracker) const;
 
-private:
+ private:
   struct Algorithms {
     kj::Maybe<jsg::Function<Transformer::TransformAlgorithm>> transform;
     kj::Maybe<jsg::Function<Transformer::FlushAlgorithm>> flush;

@@ -19,7 +19,7 @@ namespace workerd::api {
 
 // A capability to a KV namespace.
 class KvNamespace: public jsg::Object {
-public:
+ public:
   struct AdditionalHeader {
     kj::String name;
     kj::String value;
@@ -50,10 +50,8 @@ public:
   using GetResult = kj::Maybe<
       kj::OneOf<jsg::Ref<ReadableStream>, kj::Array<byte>, kj::String, jsg::JsRef<jsg::JsValue>>>;
 
-  jsg::Promise<GetResult> get(jsg::Lock& js,
-      kj::String name,
-      jsg::Optional<kj::OneOf<kj::String, GetOptions>> options,
-      CompatibilityFlags::Reader flags);
+  jsg::Promise<GetResult> get(
+      jsg::Lock& js, kj::String name, jsg::Optional<kj::OneOf<kj::String, GetOptions>> options);
 
   struct GetWithMetadataResult {
     GetResult value;
@@ -68,6 +66,10 @@ public:
     });
   };
 
+  jsg::Promise<GetWithMetadataResult> getWithMetadataImpl(jsg::Lock& js,
+      kj::String name,
+      jsg::Optional<kj::OneOf<kj::String, GetOptions>> options,
+      LimitEnforcer::KvOpType op);
   jsg::Promise<GetWithMetadataResult> getWithMetadata(
       jsg::Lock& js, kj::String name, jsg::Optional<kj::OneOf<kj::String, GetOptions>> options);
 
@@ -164,7 +166,7 @@ public:
     tracker.trackField("additionalHeaders", additionalHeaders.asPtr());
   }
 
-protected:
+ protected:
   // Do the boilerplate work of constructing an HTTP client to KV. Setting a KvOptType causes
   // the limiter for that op type to be checked. If a string is used, that's used as the operation
   // name for the HttpClient without any limiter enforcement.
@@ -173,9 +175,10 @@ protected:
   kj::Own<kj::HttpClient> getHttpClient(IoContext& context,
       kj::HttpHeaders& headers,
       kj::OneOf<LimitEnforcer::KvOpType, kj::LiteralStringConst> opTypeOrName,
-      kj::StringPtr urlStr);
+      kj::StringPtr urlStr,
+      kj::Maybe<kj::OneOf<ListOptions, kj::OneOf<kj::String, GetOptions>, PutOptions>> options);
 
-private:
+ private:
   kj::Array<AdditionalHeader> additionalHeaders;
   uint subrequestChannel;
 };

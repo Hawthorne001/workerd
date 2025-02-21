@@ -29,7 +29,7 @@ struct ResolveObserver {
     // The resolve is being performed in the context of a builtin module
     // (that is, one of the modules built into the worker runtime).
     BUILTIN,
-    // Like builtin, the but it's a module that is *only* resolvable from a builtin
+    // Like builtin, but it's a module that is *only* resolvable from a builtin
     // (like the `node-internal:...` modules)
     BUILTIN_ONLY,
   };
@@ -50,7 +50,7 @@ struct ResolveObserver {
 
   // Used to report the status of a module resolution.
   class ResolveStatus {
-  public:
+   public:
     ResolveStatus() = default;
     KJ_DISALLOW_COPY_AND_MOVE(ResolveStatus);
     virtual ~ResolveStatus() noexcept(false) {}

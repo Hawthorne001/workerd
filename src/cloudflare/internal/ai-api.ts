@@ -1,6 +1,8 @@
-// Copyright (c) 2024 Cloudflare, Inc.
+// Copyright (c) 2025 Cloudflare, Inc.
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
+
+import { AiGateway, type GatewayOptions } from 'cloudflare-internal:aig-api';
 
 interface Fetcher {
   fetch: typeof fetch;
@@ -11,6 +13,7 @@ interface AiError {
   message: string;
   name: string;
   description: string;
+  errors?: Array<{ code: number; message: string }>;
 }
 
 export type SessionOptions = {
@@ -18,18 +21,10 @@ export type SessionOptions = {
   extraHeaders?: object;
 };
 
-export type GatewayOptions = {
-  id: string;
-  cacheKey?: string;
-  cacheTtl?: number;
-  skipCache?: boolean;
-  metadata?: Record<string, number | string | boolean | null | bigint>;
-  collectLog?: boolean;
-};
-
 export type AiOptions = {
   gateway?: GatewayOptions;
-
+  /** If true it will return a Response object */
+  returnRawResponse?: boolean;
   prefix?: string;
   extraHeaders?: object;
   /*
@@ -38,8 +33,42 @@ export type AiOptions = {
   sessionOptions?: SessionOptions;
 };
 
+export type AiModelsSearchParams = {
+  author?: string;
+  hide_experimental?: boolean;
+  page?: number;
+  per_page?: number;
+  search?: string;
+  source?: number;
+  task?: string;
+};
+
+export type AiModelsSearchObject = {
+  id: string;
+  source: number;
+  name: string;
+  description: string;
+  task: {
+    id: string;
+    name: string;
+    description: string;
+  };
+  tags: string[];
+  properties: {
+    property_id: string;
+    value: string;
+  }[];
+};
+
 export class InferenceUpstreamError extends Error {
   public constructor(message: string, name = 'InferenceUpstreamError') {
+    super(message);
+    this.name = name;
+  }
+}
+
+export class AiInternalError extends Error {
+  public constructor(message: string, name = 'AiInternalError') {
     super(message);
     this.name = name;
   }
@@ -56,6 +85,8 @@ export class Ai {
   private options: AiOptions = {};
   public lastRequestId: string | null = null;
   public aiGatewayLogId: string | null = null;
+  public lastRequestHttpStatusCode: number | null = null;
+  public lastRequestInternalStatusCode: number | null = null;
 
   public constructor(fetcher: Fetcher) {
     this.fetcher = fetcher;
@@ -101,33 +132,35 @@ export class Ai {
       },
     };
 
-    const res = await this.fetcher.fetch(
-      'http://workers-binding.ai/run?version=3',
-      fetchOptions
-    );
+    let endpointUrl = 'https://workers-binding.ai/run?version=3';
+    if (options.gateway?.id) {
+      endpointUrl = 'https://workers-binding.ai/ai-gateway/run?version=3';
+    }
+
+    const res = await this.fetcher.fetch(endpointUrl, fetchOptions);
 
     this.lastRequestId = res.headers.get('cf-ai-req-id');
     this.aiGatewayLogId = res.headers.get('cf-aig-log-id');
+    this.lastRequestHttpStatusCode = res.status;
 
-    if (inputs['stream']) {
-      if (!res.ok) {
-        throw await this._parseError(res);
-      }
-
-      return res.body;
-    } else {
-      if (!res.ok || !res.body) {
-        throw await this._parseError(res);
-      }
-
-      const contentType = res.headers.get('content-type');
-
-      if (contentType === 'application/json') {
-        return (await res.json()) as object;
-      }
-
-      return res.body;
+    if (this.options.returnRawResponse) {
+      return res;
     }
+
+    if (!res.ok) {
+      throw await this._parseError(res);
+    }
+
+    if (!res.body) {
+      throw await this._parseError(res);
+    }
+
+    const contentType = res.headers.get('content-type');
+    if (contentType === 'application/json') {
+      return (await res.json()) as object;
+    }
+
+    return res.body;
   }
 
   /*
@@ -142,13 +175,54 @@ export class Ai {
 
     try {
       const parsedContent = JSON.parse(content) as AiError;
-      return new InferenceUpstreamError(
-        `${parsedContent.internalCode}: ${parsedContent.description}`,
-        parsedContent.name
-      );
+      if (parsedContent.internalCode) {
+        this.lastRequestInternalStatusCode = parsedContent.internalCode;
+        return new InferenceUpstreamError(
+          `${parsedContent.internalCode}: ${parsedContent.description}`,
+          parsedContent.name
+        );
+      } else if (
+        parsedContent.errors &&
+        parsedContent.errors.length > 0 &&
+        parsedContent.errors[0]
+      ) {
+        return new InferenceUpstreamError(
+          `${parsedContent.errors[0].code}: ${parsedContent.errors[0].message}`
+        );
+      } else {
+        return new InferenceUpstreamError(content);
+      }
     } catch {
       return new InferenceUpstreamError(content);
     }
+  }
+
+  public async models(
+    params: AiModelsSearchParams = {}
+  ): Promise<AiModelsSearchObject[]> {
+    const url = new URL('https://workers-binding.ai/ai-api/models/search');
+
+    for (const [key, value] of Object.entries(params)) {
+      url.searchParams.set(key, value.toString());
+    }
+
+    const res = await this.fetcher.fetch(url, { method: 'GET' });
+
+    switch (res.status) {
+      case 200: {
+        const data = (await res.json()) as { result: AiModelsSearchObject[] };
+        return data.result;
+      }
+      default: {
+        const data = (await res.json()) as { errors: { message: string }[] };
+
+        throw new AiInternalError(data.errors[0]?.message || 'Internal Error');
+      }
+    }
+  }
+
+  public gateway(gatewayId: string): AiGateway {
+    return new AiGateway(this.fetcher, gatewayId);
   }
 }
 

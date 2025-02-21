@@ -32,12 +32,12 @@ typedef unsigned int uint;
 // case an exception is thrown. Writing code that deals with maybes is cumbersome and error-prone
 // compared to C++ exceptions.
 class JsExceptionThrown: public std::exception {
-public:
+ public:
   JsExceptionThrown();
   ~JsExceptionThrown() noexcept = default;  // We must match `std::exception`'s noexcept.
   const char* what() const noexcept override;
 
-private:
+ private:
   void* trace[16];
   kj::ArrayPtr<void* const> tracePtr;
   mutable kj::String whatBuffer;
@@ -213,7 +213,7 @@ v8::Local<v8::Value> deepClone(v8::Local<v8::Context> context, v8::Local<v8::Val
 //
 // TODO(cleanup): Call sites should migrate to the new js.str(...) variants on jsg::Lock
 // rather than calling v8Str directly. Once the migration is a big further along, v8Str
-// and it's variants will be explicitly marked deprecated.
+// and its variants will be explicitly marked deprecated.
 template <typename T>
 v8::Local<v8::String> v8Str(v8::Isolate* isolate,
     kj::ArrayPtr<T> ptr,

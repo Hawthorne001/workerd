@@ -14,7 +14,7 @@ deps_gen()
 load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive", "http_file")
 
-NODE_VERSION = "20.14.0"
+NODE_VERSION = "22.11.0"
 
 load("@bazel_skylib//:workspace.bzl", "bazel_skylib_workspace")
 
@@ -81,6 +81,14 @@ http_archive(
 )
 
 http_archive(
+    name = "ncrypto",
+    sha256 = "b438cf71b1c24036e388f191a348cdc76aca75310eabca0fef5d81d5032a5d20",
+    strip_prefix = "ncrypto-1.0.1",
+    type = "tgz",
+    url = "https://github.com/nodejs/ncrypto/archive/refs/tags/1.0.1.tar.gz",
+)
+
+http_archive(
     name = "pyodide",
     build_file = "//:build/BUILD.pyodide",
     sha256 = "fbda450a64093a8d246c872bb901ee172a57fe594c9f35bba61f36807c73300d",
@@ -94,13 +102,17 @@ http_archive(
     urls = ["https://github.com/dom96/pyodide_packages/releases/download/just-stdlib/pyodide_packages.tar.zip"],
 )
 
-load("//:build/pyodide_bucket.bzl", "PYODIDE_ALL_WHEELS_ZIP_SHA256", "PYODIDE_GITHUB_RELEASE_URL", "PYODIDE_LOCK_SHA256")
+load("//:build/pyodide_bucket.bzl", "PYODIDE_ALL_WHEELS_ZIP_SHA256", "PYODIDE_GITHUB_RELEASE_URL")
+load("//:build/python_metadata.bzl", "PYTHON_LOCKFILES")
 
-http_file(
-    name = "pyodide-lock.json",
-    sha256 = PYODIDE_LOCK_SHA256,
-    url = PYODIDE_GITHUB_RELEASE_URL + "pyodide-lock.json",
-)
+[
+    http_file(
+        name = "pyodide-lock_" + package_date + ".json",
+        sha256 = package_lock_sha,
+        url = "https://github.com/cloudflare/pyodide-build-scripts/releases/download/" + package_date + "/pyodide-lock.json",
+    )
+    for package_date, package_lock_sha in PYTHON_LOCKFILES.items()
+]
 
 http_archive(
     name = "all_pyodide_wheels",
@@ -122,7 +134,7 @@ filegroup(
 #
 git_repository(
     name = "com_google_absl",
-    commit = "ed3733b91e472a1e7a641c1f0c1e6c0ea698e958",
+    commit = "72093794ac42be8105817ae0b0569fb411a6ca9b",
     remote = "https://chromium.googlesource.com/chromium/src/third_party/abseil-cpp.git",
 )
 
@@ -140,6 +152,18 @@ git_repository(
     remote = "https://chromium.googlesource.com/external/github.com/Maratyszcza/FP16.git",
 )
 
+git_repository(
+    name = "highway",
+    commit = "00fe003dac355b979f36157f9407c7c46448958e",
+    remote = "https://chromium.googlesource.com/external/github.com/google/highway.git",
+)
+
+# Bindings for Highway library used by V8
+bind(
+    name = "hwy",
+    actual = "@highway//:hwy",
+)
+
 # Bindings for abseil libraries used by V8
 [
     bind(
@@ -153,18 +177,13 @@ git_repository(
     ]
 ]
 
-bind(
-    name = "absl_optional",
-    actual = "@com_google_absl//absl/types:optional",
-)
-
 # OK, now we can bring in tcmalloc itself.
 http_archive(
     name = "com_google_tcmalloc",
-    sha256 = "81f285cb337f445276f37c308cb90120f8ba4311d1be9daf3b93dccf4bfdba7d",
-    strip_prefix = "google-tcmalloc-69c409c",
+    integrity = "sha256-8joG3SxfLYqR2liUznBAcMkHKYMmUtsO1qGr505VBMY=",
+    strip_prefix = "google-tcmalloc-91765c1",
     type = "tgz",
-    url = "https://github.com/google/tcmalloc/tarball/69c409c344bdf894fc7aab83e2d9e280b009b2f3",
+    url = "https://github.com/google/tcmalloc/tarball/91765c11461a01579fcbdddf430a556b818818c4",
 )
 
 # ========================================================================================
@@ -174,8 +193,10 @@ http_archive(
 git_repository(
     name = "zlib",
     build_file = "//:build/BUILD.zlib",
-    # Must match the version used by v8
-    commit = "d3aea2341cdeaf7e717bc257a59aa7a9407d318a",
+    # This should match the version specified in V8 DEPS, but in practice it is generally acceptable
+    # for it to be behind – zlib is very stable and its API has not changed in a long time, most
+    # changes to the Chromium fork affect ancillary tools and not the zlib library itself.
+    commit = "82a5fecf8aae8f288267cfdb2d29c9ebf7b37e59",
     remote = "https://chromium.googlesource.com/chromium/src/third_party/zlib.git",
 )
 
@@ -191,7 +212,7 @@ rust_register_toolchains(
         # Add support for macOS rosetta
         "aarch64-unknown-linux-gnu",
     ],
-    versions = ["1.82.0"],  # LLVM 19
+    versions = ["1.83.0"],  # LLVM 19
 )
 
 load("@rules_rust//crate_universe:repositories.bzl", "crate_universe_dependencies")
@@ -208,6 +229,18 @@ crate_repositories()
 load("@rules_rust//tools/rust_analyzer:deps.bzl", "rust_analyzer_dependencies")
 
 rust_analyzer_dependencies()
+
+# Protobuf
+load("@com_google_protobuf//:protobuf_deps.bzl", "protobuf_deps")
+
+protobuf_deps()
+
+# rules_shell
+load("@rules_shell//shell:repositories.bzl", "rules_shell_dependencies", "rules_shell_toolchains")
+
+rules_shell_dependencies()
+
+rules_shell_toolchains()
 
 # ========================================================================================
 # Node.js bootstrap
@@ -263,78 +296,9 @@ esbuild_register_toolchains(
     esbuild_version = LATEST_ESBUILD_VERSION,
 )
 
-# ========================================================================================
-# V8 and its dependencies
-#
-# Note that googlesource does not generate tarballs deterministically, so we cannot use
-# http_archive: https://github.com/google/gitiles/issues/84
-#
-# It would seem that googlesource would rather we use git protocol.
-# Fine, we can do that.
-#
-# We previously used shallow_since for our git-based dependencies, but this may actually be
-# harmful: https://github.com/bazelbuild/bazel/issues/12857
-#
-# There is an official mirror for V8 itself on GitHub, but not for dependencies like zlib (Chromium
-# fork), icu (Chromium fork), and trace_event, so we still have to use git for them.
+load("@//build/deps:v8.bzl", "deps_v8")
 
-http_archive(
-    name = "v8",
-    integrity = "sha256-2jQHW96t3jpEsjOlv9yyjgUem3kKNnpDAIDR4PPFSnw=",
-    patch_args = ["-p1"],
-    patches = [
-        "//:patches/v8/0001-Allow-manually-setting-ValueDeserializer-format-vers.patch",
-        "//:patches/v8/0002-Allow-manually-setting-ValueSerializer-format-versio.patch",
-        "//:patches/v8/0003-Add-ArrayBuffer-MaybeNew.patch",
-        "//:patches/v8/0004-Allow-Windows-builds-under-Bazel.patch",
-        "//:patches/v8/0005-Disable-bazel-whole-archive-build.patch",
-        "//:patches/v8/0006-Speed-up-V8-bazel-build-by-always-using-target-cfg.patch",
-        "//:patches/v8/0007-Implement-Promise-Context-Tagging.patch",
-        "//:patches/v8/0008-Enable-V8-shared-linkage.patch",
-        "//:patches/v8/0009-Randomize-the-initial-ExecutionContextId-used-by-the.patch",
-        "//:patches/v8/0010-increase-visibility-of-virtual-method.patch",
-        "//:patches/v8/0011-Add-ValueSerializer-SetTreatFunctionsAsHostObjects.patch",
-        "//:patches/v8/0012-Set-torque-generator-path-to-external-v8.-This-allow.patch",
-        "//:patches/v8/0013-Modify-where-to-look-for-fp16-dependency.-This-depen.patch",
-        "//:patches/v8/0014-Expose-v8-Symbol-GetDispose.patch",
-        "//:patches/v8/0015-Rename-V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE-V8_COMPR.patch",
-        "//:patches/v8/0016-Revert-TracedReference-deref-API-removal.patch",
-        "//:patches/v8/0017-Revert-heap-Add-masm-specific-unwinding-annotations-.patch",
-        "//:patches/v8/0018-Update-illegal-invocation-error-message-in-v8.patch",
-        "//:patches/v8/0019-Implement-cross-request-context-promise-resolve-hand.patch",
-        "//:patches/v8/0020-Modify-where-to-look-for-fast_float-dependency.patch",
-    ],
-    strip_prefix = "v8-13.0.245.16",
-    url = "https://github.com/v8/v8/archive/refs/tags/13.0.245.16.tar.gz",
-)
-
-git_repository(
-    name = "com_googlesource_chromium_icu",
-    build_file = "@v8//:bazel/BUILD.icu",
-    commit = "9408c6fd4a39e6fef0e1c4077602e1c83b15f3fb",
-    patch_cmds = ["find source -name BUILD.bazel | xargs rm"],
-    patch_cmds_win = ["Get-ChildItem -Path source -File -Include BUILD.bazel -Recurse | Remove-Item"],
-    remote = "https://chromium.googlesource.com/chromium/deps/icu.git",
-)
-
-http_archive(
-    name = "perfetto",
-    patch_args = ["-p1"],
-    patches = [
-        "//:patches/perfetto/0001-Rename-ui-build-to-ui-build.sh-to-allow-bazel-build-.patch",
-    ],
-    repo_mapping = {"@perfetto_dep_zlib": "@zlib"},
-    sha256 = "9bbd38a0f074038bde6ccbcf5f2ff32587eb60faec254932268ecb6f17f18186",
-    strip_prefix = "perfetto-47.0",
-    url = "https://github.com/google/perfetto/archive/refs/tags/v47.0.tar.gz",
-)
-
-# For use with perfetto
-new_local_repository(
-    name = "perfetto_cfg",
-    build_file_content = "",
-    path = "build/perfetto",
-)
+deps_v8()
 
 python_register_toolchains(
     name = "python3_13",
@@ -395,92 +359,4 @@ new_local_repository(
     name = "com_cloudflare_lol_html",
     build_file = "@workerd//deps/rust:BUILD.lolhtml",
     path = "empty",
-)
-
-# Dev tools
-
-FILE_GROUP = """filegroup(
-	name="file",
-	srcs=glob(["**"])
-)"""
-
-http_archive(
-    name = "ruff-darwin-arm64",
-    build_file_content = FILE_GROUP,
-    integrity = "sha256-KbGnLDXu1bIkD/Nl4fRdB7wMQLkzGhGcK1nMpEwPMi4=",
-    strip_prefix = "ruff-aarch64-apple-darwin",
-    url = "https://github.com/astral-sh/ruff/releases/download/0.6.7/ruff-aarch64-apple-darwin.tar.gz",
-)
-
-http_archive(
-    name = "ruff-darwin-amd64",
-    build_file_content = FILE_GROUP,
-    integrity = "sha256-W3JL0sldkm6kbaB9+mrFVoY32wR0CDhpi7SxkJ2Oug0=",
-    strip_prefix = "ruff-x86_64-apple-darwin",
-    url = "https://github.com/astral-sh/ruff/releases/download/0.6.7/ruff-x86_64-apple-darwin.tar.gz",
-)
-
-http_archive(
-    name = "ruff-linux-arm64",
-    build_file_content = FILE_GROUP,
-    integrity = "sha256-7nBZdr686PdPmCFa2EN65OHgmDCfqB3ygFaXVgUDRuM=",
-    strip_prefix = "ruff-aarch64-unknown-linux-gnu",
-    url = "https://github.com/astral-sh/ruff/releases/download/0.6.7/ruff-aarch64-unknown-linux-gnu.tar.gz",
-)
-
-http_archive(
-    name = "ruff-linux-amd64",
-    build_file_content = FILE_GROUP,
-    integrity = "sha256-Uu1+NMFYCfMT4/jtQoH+Uj5+XwZn57+ZWIhbfm8icKg=",
-    strip_prefix = "ruff-x86_64-unknown-linux-gnu",
-    url = "https://github.com/astral-sh/ruff/releases/download/0.6.7/ruff-x86_64-unknown-linux-gnu.tar.gz",
-)
-
-http_archive(
-    name = "ruff-windows-amd64",
-    build_file_content = FILE_GROUP,
-    integrity = "sha256-H2yX4kuLyNdBrkRPhTr61FQqJRyiKeLq4TnMmKE0t2A=",
-    url = "https://github.com/astral-sh/ruff/releases/download/0.6.7/ruff-x86_64-pc-windows-msvc.zip",
-)
-
-# clang-format static binary builds via GH Actions: https://github.com/npaun/bins/blob/master/.github/workflows/llvm.yml
-# TODO(soon): Move this workflow to a repo in the cloudflare GH organization
-
-http_file(
-    name = "clang-format-darwin-arm64",
-    executable = True,
-    integrity = "sha256-1hG7AcfgGL+IBrSCEhD9ed6pvIpZMdXMdhCDGkqzhpA=",
-    url = "https://github.com/npaun/bins/releases/download/llvm-18.1.8/llvm-18.1.8-darwin-arm64-clang-format",
-)
-
-http_file(
-    name = "clang-format-linux-arm64",
-    executable = True,
-    integrity = "sha256-No7G08x7VJ+CkjuhyohcTWymPPm0QUE4EZlkp9Of5jM=",
-    url = "https://github.com/npaun/bins/releases/download/llvm-18.1.8/llvm-18.1.8-linux-arm64-clang-format",
-)
-
-http_file(
-    name = "clang-format-linux-amd64",
-    executable = True,
-    integrity = "sha256-iCbaPg60x60eA9ZIWmSdFva/RD9xOBcJLUwSRK8Gxzk=",
-    url = "https://github.com/npaun/bins/releases/download/llvm-18.1.8/llvm-18.1.8-linux-amd64-clang-format",
-)
-
-http_file(
-    name = "clang-format-windows-amd64",
-    executable = True,
-    integrity = "sha256-4V2KXVoX5Ny1J7ABfVRx0nAHpAGegykhzac7zW3nK0k=",
-    url = "https://github.com/npaun/bins/releases/download/llvm-18.1.8/llvm-18.1.8-windows-amd64-clang-format.exe",
-)
-
-# ========================================================================================
-# Web Platform Tests
-
-http_archive(
-    name = "wpt",
-    build_file = "//:build/BUILD.wpt",
-    integrity = "sha256-Hxn/D6x6lI9ISlCQFq620sb8x9iXplVzXPV6zumX84A=",
-    strip_prefix = "wpt-merge_pr_48695",
-    url = "https://github.com/web-platform-tests/wpt/archive/refs/tags/merge_pr_48695.tar.gz",
 )

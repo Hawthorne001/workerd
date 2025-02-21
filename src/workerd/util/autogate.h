@@ -14,8 +14,12 @@ namespace workerd::util {
 // Workerd-specific list of autogate keys (can also be used in internal repo).
 enum class AutogateKey {
   TEST_WORKERD,
-  PYTHON_EXTERNAL_BUNDLE,
-  COMPILE_CACHE_FOR_BUILTINS,
+  STREAMING_TAIL_WORKERS,
+  // Fetches Python packages as individual bundles from GCS instead of using a single big bundle
+  // embedded in the binary
+  PYTHON_FETCH_INDIVIDUAL_PACKAGES,
+  // Adds a "reference" ID to "internal error" exception messages
+  INTERNAL_ERROR_ID,
   NumOfKeys  // Reserved for iteration.
 };
 
@@ -33,7 +37,7 @@ enum class AutogateKey {
 // When making structural changes here, ensure you align them with autogate.h in the internal repo.
 class Autogate {
 
-public:
+ public:
   static bool isEnabled(AutogateKey key);
 
   // Creates a global Autogate and seeds it with gates that are specified in the config.
@@ -45,10 +49,10 @@ public:
   // Convenience method for bin-tests to invoke initAutogate() with an appropriate config.
   static void initAutogateNamesForTest(std::initializer_list<kj::StringPtr> gateNames);
 
-  // Destroys an initialised global Autogate instance. Used only for testing.
+  // Destroys an initialized global Autogate instance. Used only for testing.
   static void deinitAutogate();
 
-private:
+ private:
   bool gates[(unsigned long)AutogateKey::NumOfKeys];
 
   Autogate(capnp::List<capnp::Text>::Reader autogates);

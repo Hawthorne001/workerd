@@ -258,8 +258,8 @@ int JsString::length(jsg::Lock& js) const {
   return inner->Length();
 }
 
-int JsString::utf8Length(jsg::Lock& js) const {
-  return inner->Utf8Length(js.v8Isolate);
+size_t JsString::utf8Length(jsg::Lock& js) const {
+  return inner->Utf8LengthV2(js.v8Isolate);
 }
 
 kj::String JsString::toString(jsg::Lock& js) const {
@@ -439,6 +439,17 @@ JsRegExp Lock::regexp(kj::StringPtr str, RegExpFlags flags, kj::Maybe<uint32_t> 
 
 JsObject Lock::obj() {
   return JsObject(v8::Object::New(v8Isolate));
+}
+
+JsObject Lock::obj(kj::ArrayPtr<kj::StringPtr> keys, kj::ArrayPtr<JsValue> values) {
+  KJ_DASSERT(keys.size() == values.size());
+  auto keys_ = KJ_MAP(k, keys) -> v8::Local<v8::Name> {
+    return v8::String::NewFromUtf8(v8Isolate, k.begin(), v8::NewStringType::kNormal, k.size())
+        .ToLocalChecked();
+  };
+  auto values_ = KJ_MAP(v, values) -> v8::Local<v8::Value> { return v; };
+  return JsObject(
+      v8::Object::New(v8Isolate, v8::Null(v8Isolate), keys_.begin(), values_.begin(), keys.size()));
 }
 
 JsObject Lock::objNoProto() {

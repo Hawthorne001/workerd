@@ -94,7 +94,7 @@ void WebSocket::initConnection(jsg::Lock& js, kj::Promise<PackedWebSocket> prom)
           [this, self = JSG_THIS](jsg::Lock& js, PackedWebSocket packedSocket) mutable {
     auto& native = *farNative;
     KJ_IF_SOME(pending, native.state.tryGet<AwaitingConnection>()) {
-      // We've succeessfully established our web socket, we do not need to cancel anything.
+      // We've successfully established our web socket, we do not need to cancel anything.
       pending.canceler.release();
     }
 
@@ -205,7 +205,7 @@ jsg::Ref<WebSocket> WebSocket::constructor(jsg::Lock& js,
       urlRecord.fragment == kj::none, DOMSyntaxError, wsErr, "The url fragment must be empty.");
 
   kj::HttpHeaders headers(context.getHeaderTable());
-  auto client = context.getHttpClient(0, false, kj::none, "WebSocket::constructor"_kjc);
+  auto client = context.getHttpClient(0, false, kj::none, "websocket_open"_kjc);
 
   // Set protocols header if necessary.
   KJ_IF_SOME(variant, protocols) {
@@ -389,7 +389,7 @@ void WebSocket::accept(jsg::Lock& js) {
   KJ_IF_SOME(accepted, native.state.tryGet<Accepted>()) {
     JSG_REQUIRE(!accepted.isHibernatable(), TypeError,
         "Can't accept() WebSocket after enabling hibernation.");
-    // Technically, this means it's okay to invoke `accept()` once a `new WebSocket()` resolves to
+    // Technically, this means it's OK to invoke `accept()` once a `new WebSocket()` resolves to
     // an established connection. This is probably okay? It might spare the worker devs a class of
     // errors they do not care care about.
     return;
@@ -512,7 +512,7 @@ void WebSocket::startReadLoop(jsg::Lock& js, kj::Maybe<kj::Own<InputGate::Critic
   // TODO(cleanup): We have to use awaitIoLegacy() so that we can handle registerPendingEvent()
   //   manually. Ideally, we'd refactor things such that a WebSocketPair where both ends are
   //   accepted locally is implemented completely in JavaScript space, using jsg::Promise instead
-  //   of kj::Promise, and then only use awaitIo() on truely remote WebSockets.
+  //   of kj::Promise, and then only use awaitIo() on truly remote WebSockets.
   // TODO(cleanup): Should addWaitUntil() take jsg::Promise instead of kj::Promise?
   context.addWaitUntil(context.awaitJs(js,
       context.awaitIoLegacy(js, kj::mv(promise))
@@ -625,7 +625,7 @@ void WebSocket::close(jsg::Lock& js, jsg::Optional<int> code, jsg::Optional<kj::
   if (reason != kj::none) {
     // The default code of 1005 cannot have a reason, per the standard, so if a reason is specified
     // then there must be a code, too.
-    JSG_REQUIRE(code != nullptr, TypeError,
+    JSG_REQUIRE(code != kj::none, TypeError,
         "If you specify a WebSocket close reason, you must also specify a code.");
   }
 
@@ -854,6 +854,7 @@ kj::Promise<void> WebSocket::pump(IoContext& context,
   KJ_ASSERT(!native.isPumping);
   native.isPumping = true;
   autoResponse.isPumping = true;
+  bool completed = false;
   KJ_DEFER({
     // We use a KJ_DEFER to set native.isPumping = false to ensure that it happens -- we had a bug
     // in the past where this was handled by the caller of WebSocket::pump() and it allowed for
@@ -869,6 +870,14 @@ kj::Promise<void> WebSocket::pump(IoContext& context,
     if (autoResponse.pendingAutoResponseDeque.size() > 0) {
       autoResponse.pendingAutoResponseDeque.clear();
     }
+
+    if (!completed) {
+      // We didn't make it to `completed = true` at the end of this function, so either an
+      // exception was thrown or the task was canceled. Either way, we cannot send any further
+      // messages, because the connection is in a broken state and will just throw more exceptions.
+      // Setting `outgoingAborted` stops us from even trying to queue any more messages.
+      native.outgoingAborted = true;
+    }
   });
 
   // If we have a ongoingAutoResponse, we must co_await it here because there's a ws.send()
@@ -876,55 +885,64 @@ kj::Promise<void> WebSocket::pump(IoContext& context,
   co_await autoResponse.ongoingAutoResponse;
   autoResponse.ongoingAutoResponse = kj::READY_NOW;
 
-  while (outgoingMessages.size() > 0) {
-    GatedMessage gatedMessage = outgoingMessages.release(*outgoingMessages.ordered().begin());
-    KJ_IF_SOME(promise, gatedMessage.outputLock) {
-      co_await promise;
+  do {
+    while (outgoingMessages.size() > 0) {
+      GatedMessage gatedMessage = outgoingMessages.release(*outgoingMessages.ordered().begin());
+      KJ_IF_SOME(promise, gatedMessage.outputLock) {
+        co_await promise;
+      }
+
+      auto size = countBytesFromMessage(gatedMessage.message);
+
+      while (gatedMessage.pendingAutoResponses > 0) {
+        KJ_ASSERT(
+            autoResponse.pendingAutoResponseDeque.size() >= gatedMessage.pendingAutoResponses);
+        auto message = kj::mv(autoResponse.pendingAutoResponseDeque.front());
+        autoResponse.pendingAutoResponseDeque.pop_front();
+        gatedMessage.pendingAutoResponses--;
+        autoResponse.queuedAutoResponses--;
+        co_await ws.send(message);
+      }
+
+      KJ_SWITCH_ONEOF(gatedMessage.message) {
+        KJ_CASE_ONEOF(text, kj::String) {
+          co_await ws.send(text);
+          break;
+        }
+        KJ_CASE_ONEOF(data, kj::Array<byte>) {
+          co_await ws.send(data);
+          break;
+        }
+        KJ_CASE_ONEOF(close, kj::WebSocket::Close) {
+          co_await ws.close(close.code, close.reason);
+          autoResponse.isClosed = true;
+          break;
+        }
+      }
+
+      KJ_IF_SOME(o, observer) {
+        o->sentMessage(size);
+      }
+
+      KJ_IF_SOME(a, context.getActor()) {
+        a.getMetrics().sentWebSocketMessage(size);
+      }
     }
 
-    auto size = countBytesFromMessage(gatedMessage.message);
-
-    while (gatedMessage.pendingAutoResponses > 0) {
-      KJ_ASSERT(autoResponse.pendingAutoResponseDeque.size() >= gatedMessage.pendingAutoResponses);
+    // If there are any auto-responses left to process, we should do it now.
+    // We should also check if the last sent message was a close. Shouldn't happen.
+    while (autoResponse.pendingAutoResponseDeque.size() > 0 && !autoResponse.isClosed) {
       auto message = kj::mv(autoResponse.pendingAutoResponseDeque.front());
       autoResponse.pendingAutoResponseDeque.pop_front();
-      gatedMessage.pendingAutoResponses--;
-      autoResponse.queuedAutoResponses--;
       co_await ws.send(message);
     }
 
-    KJ_SWITCH_ONEOF(gatedMessage.message) {
-      KJ_CASE_ONEOF(text, kj::String) {
-        co_await ws.send(text);
-        break;
-      }
-      KJ_CASE_ONEOF(data, kj::Array<byte>) {
-        co_await ws.send(data);
-        break;
-      }
-      KJ_CASE_ONEOF(close, kj::WebSocket::Close) {
-        co_await ws.close(close.code, close.reason);
-        autoResponse.isClosed = true;
-        break;
-      }
-    }
+    // While we were `co_await`ing the auto-response send, more messages could have been queued
+    // into `outgoingMessages`. If so we'll need to start over, otherwise these messages would be
+    // discarded in our KJ_DEFER block!
+  } while (outgoingMessages.size() > 0);
 
-    KJ_IF_SOME(o, observer) {
-      o->sentMessage(size);
-    }
-
-    KJ_IF_SOME(a, context.getActor()) {
-      a.getMetrics().sentWebSocketMessage(size);
-    }
-  }
-
-  // If there are any auto-responses left to process, we should do it now.
-  // We should also check if the last sent message was a close. Shouldn't happen.
-  while (autoResponse.pendingAutoResponseDeque.size() > 0 && !autoResponse.isClosed) {
-    auto message = kj::mv(autoResponse.pendingAutoResponseDeque.front());
-    autoResponse.pendingAutoResponseDeque.pop_front();
-    co_await ws.send(message);
-  }
+  completed = true;
 }
 
 void WebSocket::tryReleaseNative(jsg::Lock& js) {

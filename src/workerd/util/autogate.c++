@@ -17,10 +17,12 @@ kj::StringPtr KJ_STRINGIFY(AutogateKey key) {
   switch (key) {
     case AutogateKey::TEST_WORKERD:
       return "test-workerd"_kj;
-    case AutogateKey::PYTHON_EXTERNAL_BUNDLE:
-      return "python-external-bundle"_kj;
-    case AutogateKey::COMPILE_CACHE_FOR_BUILTINS:
-      return "compile-cache-for-builtins"_kj;
+    case AutogateKey::STREAMING_TAIL_WORKERS:
+      return "streaming-tail-workers"_kj;
+    case AutogateKey::PYTHON_FETCH_INDIVIDUAL_PACKAGES:
+      return "python-fetch-individual-packages";
+    case AutogateKey::INTERNAL_ERROR_ID:
+      return "internal-error-id";
     case AutogateKey::NumOfKeys:
       KJ_FAIL_ASSERT("NumOfKeys should not be used in getName");
   }

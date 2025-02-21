@@ -34,7 +34,7 @@ struct BuildRtti;
 // interpret all types passed through a given builder.
 template <typename MetaConfiguration>
 class Builder {
-public:
+ public:
   const MetaConfiguration config;
 
   Builder(const MetaConfiguration& config): config(config) {}
@@ -66,7 +66,7 @@ public:
     });
   }
 
-private:
+ private:
   capnp::MallocMessageBuilder builder;
   kj::HashMap<kj::String, kj::Own<capnp::MallocMessageBuilder>> symbols;
 };
@@ -112,7 +112,7 @@ struct TupleRttiBuilder {
     build(std::make_integer_sequence<size_t, std::tuple_size_v<Tuple>>{}, builder, rtti);
   }
 
-private:
+ private:
   template <size_t... Indexes>
   static inline void build(std::integer_sequence<size_t, Indexes...> seq,
       capnp::List<Type>::Builder builder,
@@ -166,7 +166,7 @@ struct BuildRtti<Configuration, jsg::JsValue> {
 template <typename Configuration>
 struct BuildRtti<Configuration, jsg::JsRegExp> {
   // This isn't really unknown but we currently do not expose these types at all, so
-  // this is ok for now.
+  // this is OK for now.
   static void build(Type::Builder builder, Builder<Configuration>& rtti) {
     builder.setUnknown();
   }
@@ -175,7 +175,7 @@ struct BuildRtti<Configuration, jsg::JsRegExp> {
 template <typename Configuration>
 struct BuildRtti<Configuration, jsg::JsMap> {
   // This isn't really unknown but we currently do not expose these types at all, so
-  // this is ok for now.
+  // this is OK for now.
   static void build(Type::Builder builder, Builder<Configuration>& rtti) {
     builder.setUnknown();
   }
@@ -184,7 +184,7 @@ struct BuildRtti<Configuration, jsg::JsMap> {
 template <typename Configuration>
 struct BuildRtti<Configuration, jsg::JsSet> {
   // This isn't really unknown but we currently do not expose these types at all, so
-  // this is ok for now.
+  // this is OK for now.
   static void build(Type::Builder builder, Builder<Configuration>& rtti) {
     builder.setUnknown();
   }
@@ -193,7 +193,7 @@ struct BuildRtti<Configuration, jsg::JsSet> {
 template <typename Configuration>
 struct BuildRtti<Configuration, jsg::JsSymbol> {
   // This isn't really unknown but we currently do not expose these types at all, so
-  // this is ok for now.
+  // this is OK for now.
   static void build(Type::Builder builder, Builder<Configuration>& rtti) {
     builder.setUnknown();
   }

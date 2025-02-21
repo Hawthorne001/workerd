@@ -301,7 +301,7 @@ namespace {
 
 // Wrapper around `WritableStreamSink` that makes it suitable for passing off to capnp RPC.
 class WritableStreamRpcAdapter final: public capnp::ExplicitEndOutputStream {
-public:
+ public:
   WritableStreamRpcAdapter(kj::Own<WritableStreamSink> inner): inner(kj::mv(inner)) {}
   ~WritableStreamRpcAdapter() noexcept(false) {
     weakRef->invalidate();
@@ -346,7 +346,7 @@ public:
     return canceler.wrap(getInner().end());
   }
 
-private:
+ private:
   kj::Maybe<kj::Own<WritableStreamSink>> inner;
   kj::Canceler canceler;
   kj::Own<kj::PromiseFulfiller<void>> doneFulfiller;
@@ -371,7 +371,7 @@ private:
 // directly on the WritableStreamController. Note that this approach is necessarily
 // a lot slower
 class WritableStreamJsRpcAdapter final: public capnp::ExplicitEndOutputStream {
-public:
+ public:
   WritableStreamJsRpcAdapter(IoContext& context, jsg::Ref<WritableStreamDefaultWriter> writer)
       : context(context),
         writer(kj::mv(writer)) {}
@@ -382,7 +382,7 @@ public:
 
     // If the stream was not explicitly ended and the writer still exists at this point,
     // then we should trigger calling the abort algorithm on the stream. Sadly, there's a
-    // bit of an incompetibility with kj::AsyncOutputStream and the standard definition of
+    // bit of an incompatibility with kj::AsyncOutputStream and the standard definition of
     // WritableStream in that AsyncOutputStream has no specific way to explicitly signal that
     // the stream is being aborted due to a particular reason.
     //
@@ -391,7 +391,7 @@ public:
     // propagate the reason back to this side. So, we have to do the best we can here. Our
     // assumption is that once the stream is dropped, if it has not been explicitly ended and
     // the writer still exists, then the writer should be aborted. This is not perfect because
-    // we cannot propgate the actual reason why it was aborted.
+    // we cannot propagate the actual reason why it was aborted.
     //
     // Note also that there is no guarantee that the abort will actually run if the context
     // is being torn down. Some WritableStream implementations might use the abort algorithm
@@ -513,7 +513,7 @@ public:
     }));
   }
 
-private:
+ private:
   IoContext& context;
   kj::Maybe<jsg::Ref<WritableStreamDefaultWriter>> writer;
   kj::Canceler canceler;

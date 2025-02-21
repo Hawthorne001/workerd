@@ -220,7 +220,7 @@ class PromiseWrapper;
 
 template <typename T>
 class Promise {
-public:
+ public:
   static_assert(!kj::canConvert<T*, v8::Data*>(),
       "jsg::Promise<T> expects T to be an instantiable C++ type, not a JS heap type; use "
       "jsg::Promise<jsg::V8Ref<T>> to represent a promise for a JavaScript heap object.");
@@ -317,7 +317,7 @@ public:
   }
 
   class Resolver {
-  public:
+   public:
     Resolver(v8::Isolate* isolate, v8::Local<v8::Promise::Resolver> v8Resolver)
         : v8Resolver(isolate, kj::mv(v8Resolver)) {}
 
@@ -366,7 +366,7 @@ public:
       tracker.trackField("resolver", v8Resolver);
     }
 
-  private:
+   private:
     V8Ref<v8::Promise::Resolver> v8Resolver;
     friend class MemoryTracker;
   };
@@ -381,7 +381,7 @@ public:
     }
   }
 
-private:
+ private:
   kj::Maybe<V8Ref<v8::Promise>> v8Promise;
   bool markedAsHandled = false;
 
@@ -534,7 +534,7 @@ template <typename TypeWrapper, typename Input>
 void thenWrap(const v8::FunctionCallbackInfo<v8::Value>& args) {
   if constexpr (isVoid<Input>()) {
     // No wrapping needed. Note that we still attach `thenWrap` to the promise chain only because
-    // we use `args.data` to prevent the object from being GC'd while the promise is still
+    // we use `args.data` to prevent the object from being GC'ed while the promise is still
     // executing.
     args.GetReturnValue().SetUndefined();
   } else if constexpr (isV8Ref<Input>()) {
@@ -565,7 +565,7 @@ void thenUnwrap(const v8::FunctionCallbackInfo<v8::Value>& args) {
 // TypeWrapper mixin for Promise.
 template <typename TypeWrapper>
 class PromiseWrapper {
-public:
+ public:
   // The constructor here is a bit of a hack. The config is optional and might not be a JsgConfig
   // object (or convertible to a JsgConfig) if is provided. However, because of the way TypeWrapper
   // inherits PromiseWrapper, we always end up passing a config option (which might be
@@ -584,7 +584,7 @@ public:
     // Add a .then() to unwrap the value (i.e. convert C++ value to JavaScript).
     //
     // We use `creator` as the `data` value for this continuation so that the creator object
-    // cannot be GC'd while the callback still exists. This gives us the KJ-style guarantee that
+    // cannot be GC'ed while the callback still exists. This gives us the KJ-style guarantee that
     // the object whose method returned the promise will not be destroyed while the promise is
     // still executing.
     auto markedAsHandled = promise.markedAsHandled;
@@ -667,7 +667,7 @@ public:
     }
   }
 
-private:
+ private:
   const JsgConfig config;
 
   static bool isThenable(v8::Local<v8::Context> context, v8::Local<v8::Value> handle) {
@@ -686,7 +686,7 @@ private:
 // weak references to rejected promises that have not been handled and will handle
 // emitting events and console warnings as appropriate.
 class UnhandledRejectionHandler {
-public:
+ public:
   using Handler = void(jsg::Lock& js,
       v8::PromiseRejectEvent event,
       jsg::V8Ref<v8::Promise> promise,
@@ -707,7 +707,7 @@ public:
     tracker.trackField("warnedRejections", warnedRejections);
   }
 
-private:
+ private:
   // Used as part of the book keeping for unhandled rejections. When an
   // unhandled rejection occurs, the unhandledRejections Table will be updated.
   // If the rejection is later handled asynchronously, then the item will be

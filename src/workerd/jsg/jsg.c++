@@ -72,7 +72,7 @@ void Data::destroy() {
       //
       // Note that only the v8::Global part of `handle` needs to be destroyed under isolate lock.
       // The `tracedRef` part has a trivial destructor so can be destroyed on any thread.
-      auto& jsgIsolate = *reinterpret_cast<IsolateBase*>(isolate->GetData(0));
+      auto& jsgIsolate = *reinterpret_cast<IsolateBase*>(isolate->GetData(SET_DATA_ISOLATE_BASE));
       jsgIsolate.deferDestruction(v8::Global<v8::Data>(kj::mv(handle)));
     }
     isolate = nullptr;
@@ -91,7 +91,7 @@ void Data::moveFromTraced(Data& other, v8::TracedReference<v8::Data>& otherTrace
   KJ_ASSERT(v8::Locker::IsLocked(isolate));
 
   // Verify the handle was not garbage-collected by trying to read it. The intention is for this
-  // to crash if the handle was GC'd before being moved away.
+  // to crash if the handle was GC'ed before being moved away.
   {
     auto& js = jsg::Lock::from(isolate);
     js.withinHandleScope([&] {
@@ -120,7 +120,7 @@ Lock::Lock(v8::Isolate* v8Isolate)
     : v8Isolate(v8Isolate),
       locker(v8Isolate),
       isolateScope(v8Isolate),
-      previousData(v8Isolate->GetData(2)),
+      previousData(v8Isolate->GetData(SET_DATA_LOCK)),
       warningsLogged(IsolateBase::from(v8Isolate).areWarningsLogged()) {
   if (previousData != nullptr) {
     // Hmm, there's already a current lock. It must be a recursive lock (i.e. a second lock taken
@@ -139,10 +139,10 @@ Lock::Lock(v8::Isolate* v8Isolate)
     KJ_LOG(ERROR, "took recursive isolate lock", kj::getStackTrace());
 #endif
   }
-  v8Isolate->SetData(2, this);
+  v8Isolate->SetData(SET_DATA_LOCK, this);
 }
 Lock::~Lock() noexcept(false) {
-  v8Isolate->SetData(2, previousData);
+  v8Isolate->SetData(SET_DATA_LOCK, previousData);
 }
 
 Value Lock::parseJson(kj::ArrayPtr<const char> data) {
@@ -185,6 +185,12 @@ void Lock::logWarning(kj::StringPtr message) {
 
 void Lock::setAllowEval(bool allow) {
   IsolateBase::from(v8Isolate).setAllowEval({}, allow);
+}
+
+void Lock::installJspi() {
+  IsolateBase::from(v8Isolate).setJspiEnabled({}, true);
+  v8Isolate->InstallConditionalFeatures(v8Context());
+  IsolateBase::from(v8Isolate).setJspiEnabled({}, false);
 }
 
 void Lock::setCaptureThrowsAsRejections(bool capture) {
@@ -283,28 +289,32 @@ JsSymbol Lock::symbolAsyncDispose() {
   return IsolateBase::from(v8Isolate).getSymbolAsyncDispose();
 }
 
-void ExternalMemoryAdjustment::maybeDeferAdjustment(v8::Isolate* isolate, size_t amount) {
+void ExternalMemoryAdjustment::maybeDeferAdjustment(
+    v8::ExternalMemoryAccounter& externalMemoryAccounter, v8::Isolate* isolate, size_t amount) {
   if (isolate == nullptr) return;
   if (v8::Locker::IsLocked(isolate)) {
-    isolate->AdjustAmountOfExternalAllocatedMemory(static_cast<int64_t>(-amount));
+    externalMemoryAccounter.Decrease(isolate, amount);
   } else {
     // Otherwise, if we don't have the isolate locked, defer the adjustment to the next
     // time that we do.
-    auto& jsgIsolate = *reinterpret_cast<IsolateBase*>(isolate->GetData(0));
+    auto& jsgIsolate = *reinterpret_cast<IsolateBase*>(isolate->GetData(SET_DATA_ISOLATE_BASE));
     jsgIsolate.deferExternalMemoryDecrement(static_cast<int64_t>(amount));
   }
 }
 
-ExternalMemoryAdjustment::ExternalMemoryAdjustment(v8::Isolate* isolate, size_t amount)
-    : amount(amount),
-      isolate(isolate) {
+ExternalMemoryAdjustment::ExternalMemoryAdjustment(
+    v8::ExternalMemoryAccounter& externalMemoryAccounter, v8::Isolate* isolate, size_t amount)
+    : externalMemoryAccounter(externalMemoryAccounter),
+      isolate(isolate),
+      amount(amount) {
   KJ_DASSERT(isolate != nullptr);
-  isolate->AdjustAmountOfExternalAllocatedMemory(amount);
+  externalMemoryAccounter.Increase(isolate, amount);
 }
 
 ExternalMemoryAdjustment::ExternalMemoryAdjustment(ExternalMemoryAdjustment&& other)
-    : amount(other.amount),
-      isolate(other.isolate) {
+    : externalMemoryAccounter(other.externalMemoryAccounter),
+      isolate(other.isolate),
+      amount(other.amount) {
   other.amount = 0;
   other.isolate = nullptr;
 }
@@ -313,7 +323,8 @@ ExternalMemoryAdjustment& ExternalMemoryAdjustment::operator=(ExternalMemoryAdju
   // If we currently have an amount, adjust it back to zero.
   // In the case we don't have the isolate lock here, the adjustment
   // will be deferred until the next time we do.
-  if (amount > 0) maybeDeferAdjustment(isolate, amount);
+  if (amount > 0) maybeDeferAdjustment(externalMemoryAccounter, isolate, amount);
+  externalMemoryAccounter = kj::mv(other.externalMemoryAccounter);
   amount = other.amount;
   isolate = other.isolate;
   other.amount = 0;
@@ -323,14 +334,14 @@ ExternalMemoryAdjustment& ExternalMemoryAdjustment::operator=(ExternalMemoryAdju
 
 ExternalMemoryAdjustment::~ExternalMemoryAdjustment() noexcept(false) {
   if (amount != 0) {
-    maybeDeferAdjustment(isolate, amount);
+    maybeDeferAdjustment(externalMemoryAccounter, isolate, amount);
   }
 }
 
 void ExternalMemoryAdjustment::adjust(Lock& js, ssize_t amount) {
   amount = kj::max(amount, -static_cast<ssize_t>(this->amount));
   this->amount += amount;
-  isolate->AdjustAmountOfExternalAllocatedMemory(amount);
+  externalMemoryAccounter.Update(isolate, amount);
 }
 
 void ExternalMemoryAdjustment::set(Lock& js, size_t amount) {
@@ -338,7 +349,8 @@ void ExternalMemoryAdjustment::set(Lock& js, size_t amount) {
 }
 
 ExternalMemoryAdjustment Lock::getExternalMemoryAdjustment(int64_t amount) {
-  return ExternalMemoryAdjustment(v8Isolate, amount);
+  return ExternalMemoryAdjustment(
+      IsolateBase::from(v8Isolate).getExternalMemoryAccounter(), v8Isolate, amount);
 }
 
 Name::Name(kj::String string): hash(kj::hashCode(string)), inner(kj::mv(string)) {}

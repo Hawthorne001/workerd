@@ -22,7 +22,7 @@ const unitTests :Workerd.Config = (
           (name = "{}", pythonRequirement = ""),
         ],
         compatibilityDate = "2024-05-02",
-        compatibilityFlags = ["python_workers_development", "python_external_bundle"],
+        compatibilityFlags = [%PYTHON_FEATURE_FLAGS],
       )
     ),
   ]
@@ -32,10 +32,16 @@ def generate_wd_test_file(requirement):
     return WD_FILE_TEMPLATE.format(requirement, requirement)
 
 # to_test is a dictionary from library name to list of imports
-def gen_import_tests(to_test):
+def gen_import_tests(to_test, python_version, pkg_skip_versions = {}):
     for lib in to_test.keys():
-        worker_py_fname = "import/{}/worker.py".format(lib)
-        wd_test_fname = "import/{}/import.wd-test".format(lib)
+        if lib.endswith("-tests"):
+            # TODO: The pyodide-build-scripts should be updated to not emit these packages. Once
+            # that's done we can remove this check.
+            continue
+
+        prefix = "import/" + lib
+        worker_py_fname = python_version + "/" + prefix + "/worker.py"
+        wd_test_fname = python_version + "/" + prefix + "/import.wd-test"
         write_file(
             name = worker_py_fname + "@rule",
             out = worker_py_fname,
@@ -47,10 +53,15 @@ def gen_import_tests(to_test):
             content = [generate_wd_test_file(lib)],
         )
 
+        skip_python_flags = [version for version, packages in pkg_skip_versions.items() if lib in packages]
         py_wd_test(
+            name = prefix,
+            directory = lib,
             src = wd_test_fname,
+            python_flags = [python_version],
+            skip_python_flags = skip_python_flags,
+            make_snapshot = False,
             args = ["--experimental", "--pyodide-package-disk-cache-dir", "../all_pyodide_wheels"],
             data = [worker_py_fname, "@all_pyodide_wheels//:whls"],
-            tags = ["slow"],
             size = "enormous",
         )

@@ -192,6 +192,16 @@ struct ServiceDesignator {
   # `entrypoint` is specified here, it names an alternate entrypoint to use on the target worker,
   # otherwise the default is used.
 
+  props :union {
+    # Value to provide in `ctx.props` in the target worker.
+
+    empty @2 :Void;
+    # Empty object. (This is the default.)
+
+    json @3 :Text;
+    # A JSON-encoded value.
+  }
+
   # TODO(someday): Options to specify which event types are allowed.
   # TODO(someday): Allow adding an outgoing middleware stack here (see TODO in Service, above).
 }
@@ -630,12 +640,9 @@ struct Worker {
 
   moduleFallback @13 :Text;
 
-  # Tail worker configuration
-  logging :union {
-    none @14 :Void;
-    toService @15 :ServiceDesignator;
-    toServices @16 :List(ServiceDesignator);
-  }
+  tails @14 :List(ServiceDesignator);
+  # List of tail worker services that should receive tail events for this worker.
+  # See: https://developers.cloudflare.com/workers/observability/logs/tail-workers/
 }
 
 struct ExternalServer {

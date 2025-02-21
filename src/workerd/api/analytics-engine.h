@@ -5,7 +5,6 @@
 #pragma once
 
 #include <workerd/api/analytics-engine-impl.h>
-#include <workerd/api/analytics-engine.capnp.h>
 #include <workerd/api/util.h>
 #include <workerd/io/io-util.h>
 #include <workerd/jsg/jsg.h>
@@ -26,7 +25,7 @@ namespace workerd::api {
 //
 // https://blog.cloudflare.com/workers-analytics-engine/
 class AnalyticsEngine: public jsg::Object {
-public:
+ public:
   explicit AnalyticsEngine(
       uint logfwdrChannel, kj::String dataset, int64_t version, uint32_t ownerId)
       : logfwdrChannel(logfwdrChannel),
@@ -66,7 +65,7 @@ public:
     tracker.trackField("dataset", dataset);
   }
 
-private:
+ private:
   double millisToNanos(double m) {
     return m * 1000000;
   }

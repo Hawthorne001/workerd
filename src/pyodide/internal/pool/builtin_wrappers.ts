@@ -46,7 +46,7 @@ export function monotonicDateNow(): number {
  *
  * In particular, we specifically don't want to allow calls from places that
  * call arbitrary functions for the user like `JsvFunction_CallBound` or
- * `raw_call_js`; if a user somehow gets there hands on a reference to
+ * `raw_call_js`; if a user somehow gets their hands on a reference to
  * `newWasmModule` and tries to call it from Python the call would come from one
  * of these places. Currently we only need to allow `convertJsFunctionToWasm`
  * but if we enable JSPI we'll need to whitelist a few more locations.
@@ -68,9 +68,33 @@ export function monotonicDateNow(): number {
  *      - ctypes is quite slow even by Python's standards
  *      - Normally ctypes allocates all closures up front
  */
+let finishedSetup = false;
+export function finishSetup() {
+  finishedSetup = true;
+}
+
 export function newWasmModule(buffer: Uint8Array): WebAssembly.Module {
-  checkCallee();
+  if (finishedSetup) {
+    checkCallee();
+  }
   return UnsafeEval.newWasmModule(buffer);
+}
+
+export async function wasmInstantiate(
+  mod: WebAssembly.Module | Uint8Array,
+  imports: WebAssembly.Imports
+): Promise<{ module: WebAssembly.Module; instance: WebAssembly.Instance }> {
+  let module;
+  if (mod instanceof WebAssembly.Module) {
+    module = mod;
+  } else {
+    if (finishedSetup) {
+      checkCallee();
+    }
+    module = UnsafeEval.newWasmModule(mod);
+  }
+  const instance = new WebAssembly.Instance(module, imports);
+  return { module, instance };
 }
 
 /**
@@ -119,19 +143,4 @@ function prepareStackTrace(_error: Error, stack: StackItem[]): boolean {
     console.warn(e);
     return false;
   }
-}
-
-export async function wasmInstantiate(
-  mod: WebAssembly.Module | Uint8Array,
-  imports: WebAssembly.Imports
-): Promise<{ module: WebAssembly.Module; instance: WebAssembly.Instance }> {
-  let module;
-  if (mod instanceof WebAssembly.Module) {
-    module = mod;
-  } else {
-    checkCallee();
-    module = UnsafeEval.newWasmModule(mod);
-  }
-  const instance = new WebAssembly.Instance(module, imports);
-  return { module, instance };
 }

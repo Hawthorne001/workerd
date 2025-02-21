@@ -29,7 +29,7 @@ kj::String randomUUID(kj::Maybe<kj::EntropySource&> optionalEntropySource);
 //
 // A "null UUID" (a UUID with a value of 0) is considered invalid and is not possible to create.
 class UUID {
-public:
+ public:
   // Create a UUID from upper and lower parts. If the UUID would be null, return kj::none.
   //
   // For example, creating a UUID from upper and lower values of 81985529216486895 and
@@ -51,7 +51,7 @@ public:
 
   // Stringify the UUID to 8-4-4-4-12 hex format.
   //
-  // Note that this is NOT just a debugging API. Its behaviour is relied upon to implement
+  // Note that this is NOT just a debugging API. Its behavior is relied upon to implement
   // user-facing APIs.
   kj::String toString() const;
 
@@ -63,7 +63,7 @@ public:
     return kj::hashCode(upper, lower);
   }
 
-private:
+ private:
   uint64_t upper;
   uint64_t lower;
 

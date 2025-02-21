@@ -80,13 +80,13 @@ uint16_t Hyperdrive::getPort() {
 
 kj::String Hyperdrive::getConnectionString() {
   return kj::str(getScheme(), "://", getUser(), ":", getPassword(), "@", getHost(), ":", getPort(),
-      "/", getDatabase(), "?sslmode=prefer");
+      "/", getDatabase(), "?sslmode=disable");
 }
 
 kj::Promise<kj::Own<kj::AsyncIoStream>> Hyperdrive::connectToDb() {
   auto& context = IoContext::current();
   auto service =
-      context.getSubrequestChannel(this->clientIndex, true, kj::none, "hyperdrive_dev"_kjc);
+      context.getSubrequestChannel(this->clientIndex, true, kj::none, "hyperdrive_connect"_kjc);
 
   kj::HttpHeaderTable headerTable;
   kj::HttpHeaders headers(headerTable);

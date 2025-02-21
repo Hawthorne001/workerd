@@ -12,12 +12,13 @@
 
 namespace workerd {
 
+class Frankenvalue;
 class IoContext_IncomingRequest;
 
 // An interface representing the services made available by a worker/pipeline to handle a
 // request.
 class WorkerInterface: public kj::HttpService {
-public:
+ public:
   // Constructs a WorkerInterface where any method called will throw the given exception.
   static kj::Own<WorkerInterface> fromException(kj::Exception&& e);
 
@@ -30,7 +31,7 @@ public:
       kj::HttpService::Response& response) = 0;
   // TODO(perf): Consider changing this to return Promise<DeferredProxy>. This would allow
   //   more resources to be dropped when merely proxying a request. However, it means we would no
-  //   longer be immplementing kj::HttpService. But maybe that doesn't matter too much in practice.
+  //   longer be implementing kj::HttpService. But maybe that doesn't matter too much in practice.
 
   // This is the same as the inherited HttpService::connect(), but we override it to be
   // pure-virtual to force all subclasses of WorkerInterface to implement it explicitly rather
@@ -60,7 +61,7 @@ public:
   };
 
   class AlarmFulfiller {
-  public:
+   public:
     AlarmFulfiller(kj::Own<kj::PromiseFulfiller<AlarmResult>> fulfiller);
     KJ_DISALLOW_COPY(AlarmFulfiller);
     AlarmFulfiller(AlarmFulfiller&&) = default;
@@ -70,7 +71,7 @@ public:
     void reject(const kj::Exception& e);
     void cancel();
 
-  private:
+   private:
     kj::Maybe<kj::Own<kj::PromiseFulfiller<AlarmResult>>> maybeFulfiller;
     kj::Maybe<kj::PromiseFulfiller<AlarmResult>&> getFulfiller();
   };
@@ -101,7 +102,7 @@ public:
   static constexpr auto ALARM_RETRY_MAX_TRIES = 6;
 
   class CustomEvent {
-  public:
+   public:
     struct Result {
       // Outcome for logging / metrics purposes.
       EventOutcome outcome;
@@ -111,6 +112,7 @@ public:
     // for this event.
     virtual kj::Promise<Result> run(kj::Own<IoContext_IncomingRequest> incomingRequest,
         kj::Maybe<kj::StringPtr> entrypointName,
+        Frankenvalue props,
         kj::TaskSet& waitUntilTasks) = 0;
 
     // Forward the event over RPC.
@@ -143,7 +145,7 @@ public:
   [[nodiscard]] virtual kj::Promise<CustomEvent::Result> customEvent(
       kj::Own<CustomEvent> event) = 0;
 
-private:
+ private:
   kj::Maybe<kj::Own<kj::HttpService>> adapterService;
 };
 
@@ -153,7 +155,7 @@ kj::Own<WorkerInterface> newPromisedWorkerInterface(kj::Promise<kj::Own<WorkerIn
 
 template <typename Func>
 class LazyWorkerInterface final: public WorkerInterface {
-public:
+ public:
   LazyWorkerInterface(Func func): func(kj::mv(func)) {}
 
   void ensureResolve() {
@@ -235,7 +237,7 @@ public:
     }
   }
 
-private:
+ private:
   kj::Maybe<Func> func;
   kj::Maybe<kj::ForkedPromise<void>> promise;
   kj::Maybe<kj::Own<WorkerInterface>> worker;
@@ -264,7 +266,7 @@ kj::Own<WorkerInterface> newRevocableWebSocketWorkerInterface(
 // is intended to be single-use, this class is also inherently single-use (i.e. only one event
 // can be delivered).
 class RpcWorkerInterface: public WorkerInterface {
-public:
+ public:
   RpcWorkerInterface(capnp::HttpOverCapnpFactory& httpOverCapnpFactory,
       capnp::ByteStreamFactory& byteStreamFactory,
       rpc::EventDispatcher::Client dispatcher);
@@ -286,7 +288,7 @@ public:
   kj::Promise<AlarmResult> runAlarm(kj::Date scheduledTime, uint32_t retryCount) override;
   kj::Promise<CustomEvent::Result> customEvent(kj::Own<CustomEvent> event) override;
 
-private:
+ private:
   capnp::HttpOverCapnpFactory& httpOverCapnpFactory;
   capnp::ByteStreamFactory& byteStreamFactory;
   rpc::EventDispatcher::Client dispatcher;

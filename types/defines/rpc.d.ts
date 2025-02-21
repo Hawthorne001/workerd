@@ -190,7 +190,7 @@ declare module "cloudflare:workers" {
     constructor(ctx: DurableObjectState, env: Env);
 
     fetch?(request: Request): Response | Promise<Response>;
-    alarm?(): void | Promise<void>;
+    alarm?(alarmInfo?: AlarmInvocationInfo): void | Promise<void>;
     webSocketMessage?(
       ws: WebSocket,
       message: string | ArrayBuffer
@@ -217,20 +217,25 @@ declare module "cloudflare:workers" {
     | `${number} ${WorkflowDurationLabel}${"s" | ""}`
     | number;
 
+  export type WorkflowDelayDuration = WorkflowSleepDuration;
+
+  export type WorkflowTimeoutDuration = WorkflowSleepDuration;
+
   export type WorkflowBackoff = "constant" | "linear" | "exponential";
 
   export type WorkflowStepConfig = {
     retries?: {
       limit: number;
-      delay: string | number;
+      delay: WorkflowDelayDuration | number;
       backoff?: WorkflowBackoff;
     };
-    timeout?: string | number;
+    timeout?: WorkflowTimeoutDuration | number;
   };
 
   export type WorkflowEvent<T> = {
     payload: Readonly<T>;
     timestamp: Date;
+    instanceId: string;
   };
 
   export abstract class WorkflowStep {
@@ -249,6 +254,8 @@ declare module "cloudflare:workers" {
 
     protected ctx: ExecutionContext;
     protected env: Env;
+
+    constructor(ctx: ExecutionContext, env: Env);
 
     run(event: Readonly<WorkflowEvent<T>>, step: WorkflowStep): Promise<unknown>;
   }

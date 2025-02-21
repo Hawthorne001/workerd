@@ -478,7 +478,7 @@ bool ByteQueue::ByobRequest::respond(jsg::Lock& js, size_t amount) {
   // It is possible that the request was partially filled already.
   req.pullInto.filled -= unaligned;
 
-  // Fullfill this request!
+  // Fulfill this request!
   consumer.resolveRead(js, req);
 
   if (unaligned > 0) {
@@ -498,7 +498,7 @@ bool ByteQueue::ByobRequest::respond(jsg::Lock& js, size_t amount) {
 
 bool ByteQueue::ByobRequest::respondWithNewView(jsg::Lock& js, jsg::BufferSource view) {
   // The idea here is that rather than filling the view that the controller was given,
-  // it chose to create it's own view and fill that, likely over the same ArrayBuffer.
+  // it chose to create its own view and fill that, likely over the same ArrayBuffer.
   // What we do here is perform some basic validations on what we were given, and if
   // those pass, we'll replace the backing store held in the req.pullInto with the one
   // given, then continue on issuing the respond as normal.
@@ -687,7 +687,7 @@ void ByteQueue::handlePush(
         amountToCopy + pending.pullInto.filled <= pending.pullInto.store.size());
 
     // Awesome, so now we safely copy amountToCopy bytes from the current entry into
-    // the remaining space in pending.pullInto.store, befing careful to account for
+    // the remaining space in pending.pullInto.store, being careful to account for
     // the entryOffset and pending.pullInto.filled offsets to determine the range
     // where we start copying.
     auto entryPtr = newEntry->toArrayPtr();
@@ -801,7 +801,7 @@ void ByteQueue::handleRead(jsg::Lock& js,
             continue;
           }
 
-          // Otherwise, it is ok that there is data remaining but the amountToConsume
+          // Otherwise, it is OK that there is data remaining but the amountToConsume
           // should be 0. Specifically, we either consume the entire entry and there
           // is data left over to consume, or we did not consume the entire entry
           // but read all that we can.

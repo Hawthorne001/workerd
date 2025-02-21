@@ -2,10 +2,11 @@ import { default as ArtifactBundler } from 'pyodide-internal:artifacts';
 import { default as UnsafeEval } from 'internal:unsafe-eval';
 import { default as DiskCache } from 'pyodide-internal:disk_cache';
 import {
-  SITE_PACKAGES,
+  FilePath,
+  VIRTUALIZED_DIR,
   getSitePackagesPath,
 } from 'pyodide-internal:setupPackages';
-import { default as TarReader } from 'pyodide-internal:packages_tar_reader';
+import { default as EmbeddedPackagesTarReader } from 'pyodide-internal:packages_tar_reader';
 import {
   SHOULD_SNAPSHOT_TO_DISK,
   IS_CREATING_BASELINE_SNAPSHOT,
@@ -25,10 +26,6 @@ let LOADED_BASELINE_SNAPSHOT: number;
  * `pyodide.loadPackage`. In trade we add memory snapshots here.
  */
 
-const TOP_LEVEL_SNAPSHOT =
-  ArtifactBundler.isEwValidating() || SHOULD_SNAPSHOT_TO_DISK;
-const SHOULD_UPLOAD_SNAPSHOT = TOP_LEVEL_SNAPSHOT;
-
 /**
  * Global variable for the memory snapshot. On the first run we stick a copy of
  * the linear memory here, on subsequent runs we can skip bootstrapping Python
@@ -43,32 +40,6 @@ export let SHOULD_RESTORE_SNAPSHOT = false;
  * Record the dlopen handles that are needed by the MEMORY.
  */
 let DSO_METADATA: any = {}; // TODO
-
-/**
- * Used to defer artifact upload. This is set during initialisation, but is executed during a
- * request because an IO context is needed for the upload.
- */
-let DEFERRED_UPLOAD_FUNCTION: (() => Promise<void>) | undefined = undefined;
-
-export async function uploadArtifacts(): Promise<void> {
-  if (DEFERRED_UPLOAD_FUNCTION) {
-    return await DEFERRED_UPLOAD_FUNCTION();
-  }
-}
-
-/**
- * Used to hold the memory that needs to be uploaded for the validator.
- */
-let MEMORY_TO_UPLOAD: ArtifactBundler.MemorySnapshotResult | undefined =
-  undefined;
-function getMemoryToUpload(): ArtifactBundler.MemorySnapshotResult {
-  if (!MEMORY_TO_UPLOAD) {
-    throw new TypeError('Expected MEMORY_TO_UPLOAD to be set');
-  }
-  const tmp = MEMORY_TO_UPLOAD;
-  MEMORY_TO_UPLOAD = undefined;
-  return tmp;
-}
 
 /**
  * Preload a dynamic library.
@@ -102,6 +73,49 @@ function loadDynlib(
   }
 }
 
+/**
+ * This function is used to ensure the order in which we load SO_FILES stays the same.
+ *
+ * The sort always puts _lzma.so and _ssl.so
+ * first, because these SO_FILES are loaded in the baseline snapshot, and if we want to generate
+ * a package snapshot while a baseline snapshot is loaded we need them to be first. The rest of the
+ * files are sorted alphabetically.
+ *
+ * The `filePaths` list is of the form [["folder", "file.so"], ["file.so"]], so each element in it
+ * is effectively a file path.
+ */
+function sortSoFiles(filePaths: FilePath[]): FilePath[] {
+  let result = [];
+  let hasLzma = false;
+  let hasSsl = false;
+  const lzmaFile = '_lzma.so';
+  const sslFile = '_ssl.so';
+  for (const path of filePaths) {
+    if (path.length == 1 && path[0] == lzmaFile) {
+      hasLzma = true;
+    } else if (path.length == 1 && path[0] == sslFile) {
+      hasSsl = true;
+    } else {
+      result.push(path);
+    }
+  }
+
+  // JS might handle sorting lists of lists fine, but I'd rather be explicit here and make it compare
+  // strings.
+  result = result
+    .map((x) => x.join('/'))
+    .sort()
+    .map((x) => x.split('/'));
+  if (hasSsl) {
+    result.unshift([sslFile]);
+  }
+  if (hasLzma) {
+    result.unshift([lzmaFile]);
+  }
+
+  return result;
+}
+
 // used for checkLoadedSoFiles a snapshot sanity check
 const PRELOADED_SO_FILES: string[] = [];
 
@@ -117,16 +131,27 @@ const PRELOADED_SO_FILES: string[] = [];
  * there.
  */
 export function preloadDynamicLibs(Module: Module): void {
-  let SO_FILES_TO_LOAD = SITE_PACKAGES.soFiles;
+  let SO_FILES_TO_LOAD = VIRTUALIZED_DIR.getSoFilesToLoad();
   if (IS_CREATING_BASELINE_SNAPSHOT || LOADED_BASELINE_SNAPSHOT) {
     SO_FILES_TO_LOAD = [['_lzma.so'], ['_ssl.so']];
   }
+  // The order in which we load the SO_FILES matters. For example, if a snapshot was generated with
+  // SO_FILES loaded in a certain way, then if we load that snapshot and load the SO_FILES
+  // differently here then Python will crash.
+  SO_FILES_TO_LOAD = sortSoFiles(SO_FILES_TO_LOAD);
+
   try {
     const sitePackages = getSitePackagesPath(Module);
     for (const soFile of SO_FILES_TO_LOAD) {
-      let node: TarFSInfo | undefined = SITE_PACKAGES.rootInfo;
+      let node: TarFSInfo | undefined = VIRTUALIZED_DIR.getSitePackagesRoot();
       for (const part of soFile) {
         node = node?.children?.get(part);
+      }
+      if (!node) {
+        node = VIRTUALIZED_DIR.getDynlibRoot();
+        for (const part of soFile) {
+          node = node?.children?.get(part);
+        }
       }
       if (!node) {
         throw Error('fs node could not be found for ' + soFile);
@@ -136,7 +161,10 @@ export function preloadDynamicLibs(Module: Module): void {
         throw Error('contentsOffset not defined for ' + soFile);
       }
       const wasmModuleData = new Uint8Array(size);
-      TarReader.read(contentsOffset, wasmModuleData);
+      (node.reader ?? EmbeddedPackagesTarReader).read(
+        contentsOffset,
+        wasmModuleData
+      );
       const path = sitePackages + '/' + soFile.join('/');
       PRELOADED_SO_FILES.push(path);
       loadDynlib(Module, path, wasmModuleData);
@@ -231,7 +259,7 @@ function memorySnapshotDoImports(Module: Module): string[] {
   // grab them and put them into a set for fast filtering.
   const importedModules: string[] =
     ArtifactBundler.constructor.filterPythonScriptImportsJs(
-      MetadataReader.getNames(),
+      MetadataReader.getNames('py'),
       ArtifactBundler.constructor.parsePythonScriptImports(
         MetadataReader.getWorkerFiles('py')
       )
@@ -267,40 +295,12 @@ function checkLoadedSoFiles(dsoJSON: DylinkInfo): void {
  * are initialized in the linear memory snapshot and then saving a copy of the
  * linear memory into MEMORY.
  */
-function makeLinearMemorySnapshot(
-  Module: Module
-): ArtifactBundler.MemorySnapshotResult {
-  const importedModulesList = memorySnapshotDoImports(Module);
+function makeLinearMemorySnapshot(Module: Module): Uint8Array {
   const dsoJSON = recordDsoHandles(Module);
   if (IS_CREATING_BASELINE_SNAPSHOT) {
     // checkLoadedSoFiles(dsoJSON);
   }
-  return {
-    snapshot: encodeSnapshot(Module.HEAP8, dsoJSON),
-    importedModulesList,
-  };
-}
-
-function setUploadFunction(
-  snapshot: Uint8Array,
-  importedModulesList: string[]
-): void {
-  if (snapshot.constructor.name !== 'Uint8Array') {
-    throw new TypeError('Expected TO_UPLOAD to be a Uint8Array');
-  }
-  if (TOP_LEVEL_SNAPSHOT) {
-    MEMORY_TO_UPLOAD = { snapshot, importedModulesList };
-    return;
-  }
-}
-
-// TODO(later): Rename this to avoid `upload` nomenclature.
-export function maybeSetupSnapshotUpload(Module: Module): void {
-  if (!SHOULD_UPLOAD_SNAPSHOT) {
-    return;
-  }
-  const { snapshot, importedModulesList } = makeLinearMemorySnapshot(Module);
-  setUploadFunction(snapshot, importedModulesList);
+  return encodeSnapshot(Module.HEAP8, dsoJSON);
 }
 
 // "\x00snp"
@@ -413,11 +413,15 @@ export function finishSnapshotSetup(pyodide: Pyodide): void {
   }
 }
 
-export function maybeStoreMemorySnapshot() {
+export function maybeCollectSnapshot(Module: Module): void {
+  // In order to surface any problems that occur in `memorySnapshotDoImports` to
+  // users in local development, always call it even if we aren't actually
+  const importedModulesList = memorySnapshotDoImports(Module);
   if (ArtifactBundler.isEwValidating()) {
-    ArtifactBundler.storeMemorySnapshot(getMemoryToUpload());
+    const snapshot = makeLinearMemorySnapshot(Module);
+    ArtifactBundler.storeMemorySnapshot({ snapshot, importedModulesList });
   } else if (SHOULD_SNAPSHOT_TO_DISK) {
-    DiskCache.put('snapshot.bin', getMemoryToUpload().snapshot);
-    console.log('Saved snapshot to disk');
+    const snapshot = makeLinearMemorySnapshot(Module);
+    DiskCache.put('snapshot.bin', snapshot);
   }
 }

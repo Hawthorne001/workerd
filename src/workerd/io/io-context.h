@@ -16,6 +16,7 @@
 #include <workerd/io/trace.h>
 #include <workerd/jsg/async-context.h>
 #include <workerd/jsg/jsg.h>
+#include <workerd/util/exception.h>
 #include <workerd/util/uncaught-exception-source.h>
 #include <workerd/util/weak-refs.h>
 
@@ -47,10 +48,10 @@ class IoContext;
 // those will be emitted all at once with a single header message followed by contextual
 // information for each individual collected instance.
 class WarningAggregator final: public kj::AtomicRefcounted {
-public:
+ public:
   // The IoContext will maintain a map of WarningAggregators based on an opaque key.
   class Key final {
-  public:
+   public:
     Key(): hash(kj::hashCode(this)) {}
     KJ_DISALLOW_COPY_AND_MOVE(Key);
     inline uint hashCode() const {
@@ -60,13 +61,13 @@ public:
       return this == &other;
     }
 
-  private:
+   private:
     uint hash;
   };
 
   // Captures the contextual information for a specific aggregated warning.
   class WarningContext {
-  public:
+   public:
     virtual ~WarningContext() noexcept(false) = default;
     virtual kj::String toString(jsg::Lock& js) = 0;
   };
@@ -84,7 +85,7 @@ public:
 
   using Map = kj::HashMap<const Key&, kj::Own<WarningAggregator>>;
 
-private:
+ private:
   kj::Own<const Worker> worker;
   kj::Own<RequestObserver> requestMetrics;
   EmitCallback emitter;
@@ -106,11 +107,12 @@ private:
 // usage) to the "current" incoming request, which is defined as the newest request that hasn't
 // already completed.
 class IoContext_IncomingRequest final {
-public:
+ public:
   IoContext_IncomingRequest(kj::Own<IoContext> context,
       kj::Own<IoChannelFactory> ioChannelFactory,
       kj::Own<RequestObserver> metrics,
-      kj::Maybe<kj::Own<WorkerTracer>> workerTracer);
+      kj::Maybe<kj::Own<WorkerTracer>> workerTracer,
+      tracing::InvocationSpanContext invocationSpanContext);
   KJ_DISALLOW_COPY_AND_MOVE(IoContext_IncomingRequest);
   ~IoContext_IncomingRequest() noexcept(false);
 
@@ -160,11 +162,22 @@ public:
     return workerTracer;
   }
 
-private:
+  // The invocation span context is a unique identifier for a specific
+  // worker invocation.
+  tracing::InvocationSpanContext& getInvocationSpanContext() {
+    return invocationSpanContext;
+  }
+
+ private:
   kj::Own<IoContext> context;
   kj::Own<RequestObserver> metrics;
   kj::Maybe<kj::Own<WorkerTracer>> workerTracer;
   kj::Own<IoChannelFactory> ioChannelFactory;
+
+  // The invocation span context identifies the trace id, invocation id, and root
+  // span for the current request. Every invocation of a worker function always
+  // has a root span, even if it is not explicitly traced.
+  tracing::InvocationSpanContext invocationSpanContext;
 
   bool wasDelivered = false;
 
@@ -190,7 +203,7 @@ private:
 // The IoContext serves as a bridge between JavaScript objects and I/O objects. I/O
 // objects are strongly tied to the KJ event loop, and thus must live on a single thread. The
 // JS isolate, however, can move between threads, bringing all garbage-collected heap objects
-// with it. So, when a GC'd object holds a reference to I/O objects or tasks (KJ promises), it
+// with it. So, when a GC'ed object holds a reference to I/O objects or tasks (KJ promises), it
 // needs help from IoContext manage this.
 //
 // Whenever JavaScript is executing, the current IoContext can be obtained via
@@ -205,7 +218,7 @@ private:
 // like this. We don't want people leaking heavy objects or allowing simultaneous requests to
 // interfere with each other.
 class IoContext final: public kj::Refcounted, private kj::TaskSet::ErrorHandler {
-public:
+ public:
   class TimeoutManagerImpl;
 
   // Construct a new IoContext. Before using it, you must also create an IncomingRequest.
@@ -478,7 +491,7 @@ public:
   //
   // The JS promise must complete within this IoContext. The KJ promise will reject
   // immediately if any of these happen:
-  // - The JS promise is GC'd without resolving.
+  // - The JS promise is GC'ed without resolving.
   // - The JS promise is resolved from the wrong context.
   // - The system detects that no further progress will be made in this context (because there is no
   //   more JavaScript to run, and there is no outstanding I/O scheduled with awaitIo()).
@@ -611,7 +624,7 @@ public:
   // Returns a promise that resolves after some time. This is intended to be used for implementing
   // time limits on some sort of operation, not for implementing application-driven timing, as it
   // does not maintain consistency with the clock as observed through Date.now(), e.g. when it
-  // comes to spectre mitigations.
+  // comes to Spectre mitigations.
   kj::Promise<void> afterLimitTimeout(kj::Duration t) {
     return getIoChannelFactory().getTimer().afterLimitTimeout(t);
   }
@@ -698,19 +711,11 @@ public:
       kj::Maybe<kj::String> cfBlobJson,
       kj::ConstString operationName);
 
-  // As above, but with list of span tags to add.
-  // TODO(o11y): For now this only supports literal values based on initializer_list constraints.
-  // Add syntactic sugar to kj::vector so that we can pass in a vector more ergonomically and use
-  // that instead to support other value types.
-  struct SpanTagParams {
-    kj::LiteralStringConst key;
-    kj::LiteralStringConst value;
-  };
   kj::Own<WorkerInterface> getSubrequestChannelWithSpans(uint channel,
       bool isInHouse,
       kj::Maybe<kj::String> cfBlobJson,
       kj::ConstString operationName,
-      std::initializer_list<SpanTagParams> tags);
+      kj::Vector<Span::Tag> tags);
 
   // Like getSubrequestChannel() but doesn't enforce limits. Use for trusted paths only.
   kj::Own<WorkerInterface> getSubrequestChannelNoChecks(uint channel,
@@ -730,7 +735,7 @@ public:
       bool isInHouse,
       kj::Maybe<kj::String> cfBlobJson,
       kj::ConstString operationName,
-      std::initializer_list<SpanTagParams> tags);
+      kj::Vector<Span::Tag> tags);
 
   // Convenience methods that call getSubrequest*() and adapt the returned WorkerInterface objects
   // to HttpClient.
@@ -776,6 +781,10 @@ public:
   SpanParent getCurrentTraceSpan();
   SpanParent getCurrentUserTraceSpan();
 
+  tracing::InvocationSpanContext& getInvocationSpanContext() {
+    return getCurrentIncomingRequest().invocationSpanContext;
+  }
+
   // Returns a builder for recording tracing spans (or a no-op builder if tracing is inactive).
   // If called while the JS lock is held, uses the trace information from the current async
   // context, if available.
@@ -816,7 +825,7 @@ public:
     return *getCurrentIncomingRequest().ioChannelFactory;
   }
 
-private:
+ private:
   ThreadContext& thread;
 
   kj::Own<WeakRef> selfRef = kj::refcounted<WeakRef>(kj::Badge<IoContext>(), *this);
@@ -905,7 +914,7 @@ private:
   kj::Maybe<jsg::JsRef<jsg::JsObject>> promiseContextTag;
 
   class Runnable {
-  public:
+   public:
     virtual void run(Worker::Lock& lock) = 0;
   };
   void runImpl(Runnable& runnable,
@@ -1249,23 +1258,42 @@ kj::_::ReducePromises<RemoveIoOwn<T>> IoContext::awaitJs(jsg::Lock& js, jsg::Pro
   auto paf = kj::newPromiseAndFulfiller<RemoveIoOwn<T>>();
   struct RefcountedFulfiller: public Finalizeable, public kj::Refcounted {
     kj::Own<kj::PromiseFulfiller<RemoveIoOwn<T>>> fulfiller;
+    kj::Own<const AtomicWeakRef<Worker::Isolate>> maybeIsolate;
     bool isDone = false;
 
-    RefcountedFulfiller(kj::Own<kj::PromiseFulfiller<RemoveIoOwn<T>>> fulfiller)
-        : fulfiller(kj::mv(fulfiller)) {}
+    RefcountedFulfiller(kj::Own<const AtomicWeakRef<Worker::Isolate>> maybeIsolate,
+        kj::Own<kj::PromiseFulfiller<RemoveIoOwn<T>>> fulfiller)
+        : fulfiller(kj::mv(fulfiller)),
+          maybeIsolate(kj::mv(maybeIsolate)) {}
 
     ~RefcountedFulfiller() noexcept(false) {
       if (!isDone) {
+        reject();
+      }
+    }
+
+   private:
+    void reject() {
+      // We use a weak isolate reference here in case the isolate gets dropped before this code
+      // is executed. In that case we default to `false` as we cannot access the original isolate.
+      auto hasExcessivelyExceededHeapLimit = maybeIsolate->tryAddStrongRef()
+                                                 .map([](kj::Own<const Worker::Isolate> isolate) {
+        return isolate->getLimitEnforcer().hasExcessivelyExceededHeapLimit();
+      }).orDefault(false);
+      if (hasExcessivelyExceededHeapLimit) {
+        auto e = JSG_KJ_EXCEPTION(OVERLOADED, Error, "Worker has exceeded memory limit.");
+        e.setDetail(MEMORY_LIMIT_DETAIL_ID, kj::heapArray<kj::byte>(0));
+        fulfiller->reject(kj::mv(e));
+      } else {
         // The JavaScript resolver was garbage collected, i.e. JavaScript will never resolve
         // this promise.
         fulfiller->reject(JSG_KJ_EXCEPTION(FAILED, Error, "Promise will never complete."));
       }
     }
 
-  private:
     kj::Maybe<kj::StringPtr> finalize() override {
       if (!isDone) {
-        fulfiller->reject(JSG_KJ_EXCEPTION(FAILED, Error, "Promise will never complete."));
+        reject();
         isDone = true;
         return "A hanging Promise was canceled. This happens when the worker runtime is waiting "
                "for a Promise from JavaScript to resolve, but has detected that the Promise "
@@ -1276,7 +1304,8 @@ kj::_::ReducePromises<RemoveIoOwn<T>> IoContext::awaitJs(jsg::Lock& js, jsg::Pro
       }
     }
   };
-  auto fulfiller = kj::refcounted<RefcountedFulfiller>(kj::mv(paf.fulfiller));
+  auto& isolate = Worker::Isolate::from(js);
+  auto fulfiller = kj::refcounted<RefcountedFulfiller>(isolate.getWeakRef(), kj::mv(paf.fulfiller));
 
   auto errorHandler = [fulfiller = addObject(kj::addRef(*fulfiller))](
                           jsg::Lock& js, jsg::Value jsExceptionRef) mutable {

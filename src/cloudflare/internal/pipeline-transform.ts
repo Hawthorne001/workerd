@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-non-null-assertion */
 // Copyright (c) 2024 Cloudflare, Inc.
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
@@ -12,6 +13,7 @@ async function* readLines(
   let partial = '';
 
   // @ts-expect-error must have a '[Symbol.asyncIterator]()' method
+  // eslint-disable-next-line @typescript-eslint/await-thenable
   for await (const chunk of stream) {
     const full = partial + (chunk as string);
     for (const char of full) {
@@ -56,26 +58,39 @@ enum Format {
   JSON_STREAM = 'json_stream', // jsonl
 }
 
-export class PipelineTransformImpl extends entrypoints.WorkerEntrypoint {
+type PipelineBatchMetadata = {
+  pipelineId: string;
+  pipelineName: string;
+};
+
+type PipelineRecord = Record<string, unknown>;
+
+export class PipelineTransformImpl<
+  I extends PipelineRecord,
+  O extends PipelineRecord,
+> extends entrypoints.WorkerEntrypoint {
   #batch?: Batch;
   #initalized: boolean = false;
 
-  // stub overriden on the sub class
+  // stub overridden on the subclass
   // eslint-disable-next-line @typescript-eslint/require-await
-  public async transformJson(_data: object[]): Promise<object[]> {
+  public async run(
+    _records: I[],
+    _metadata: PipelineBatchMetadata
+  ): Promise<O[]> {
     throw new Error('should be implemented by parent');
   }
 
-  // called by the dispatcher which then calls the subclass methods
+  // called by the dispatcher to validate that run is properly implemented by the subclass
   // @ts-expect-error thinks ping is never used
   private _ping(): Promise<void> {
-    // making sure the function was overriden by an implementing subclass
-    if (this.transformJson !== PipelineTransformImpl.prototype.transformJson) {
+    // making sure the function was overridden by an implementing subclass
+    if (this.run !== PipelineTransformImpl.prototype.run) {
       return Promise.resolve();
     } else {
       return Promise.reject(
         new Error(
-          'the transformJson method must be overridden by the PipelineTransform subclass'
+          'the run method must be overridden by the PipelineTransformationEntrypoint subclass'
         )
       );
     }
@@ -84,8 +99,11 @@ export class PipelineTransformImpl extends entrypoints.WorkerEntrypoint {
   // called by the dispatcher which then calls the subclass methods
   // the reason this is typescript private and not javascript private is that this must be
   // able to be called by the dispatcher but should not be called by the class implementer
-  // @ts-expect-error _transform is called by rpc
-  private async _transform(batch: Batch): Promise<JsonStream> {
+  // @ts-expect-error _run is called by rpc
+  private async _run(
+    batch: Batch,
+    metadata: PipelineBatchMetadata
+  ): Promise<JsonStream> {
     if (this.#initalized) {
       throw new Error('pipeline entrypoint has already been initialized');
     }
@@ -93,45 +111,47 @@ export class PipelineTransformImpl extends entrypoints.WorkerEntrypoint {
     this.#batch = batch;
     this.#initalized = true;
 
-    switch (this.#batch.format) {
-      case Format.JSON_STREAM: {
-        const data = await this.#readJsonStream();
-        const transformed = await this.transformJson(data);
-        return this.#sendJson(transformed);
-      }
-      default:
-        throw new Error('unsupported batch format');
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+    if (this.#batch.format === Format.JSON_STREAM) {
+      const records: I[] = await this.#readJsonStream();
+      const transformed = await this.run(records, metadata);
+      return this.#sendJson(transformed);
+    } else {
+      throw new Error(
+        'PipelineTransformationEntrypoint run supports only the JSON_STREAM batch format'
+      );
     }
   }
 
-  async #readJsonStream(): Promise<object[]> {
+  async #readJsonStream(): Promise<I[]> {
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
     if (this.#batch!.format !== Format.JSON_STREAM) {
+      // eslint-disable-next-line @typescript-eslint/restrict-template-expressions
       throw new Error(`expected JSON_STREAM not ${this.#batch!.format}`);
     }
 
     const batch = this.#batch!.data as ReadableStream<Uint8Array>;
     const decoder = batch.pipeThrough(new TextDecoderStream());
 
-    const data: object[] = [];
+    const data: I[] = [];
     for await (const line of readLines(decoder)) {
-      data.push(JSON.parse(line) as object);
+      data.push(JSON.parse(line) as I);
     }
 
     return data;
   }
 
-  #sendJson(data: object[]): JsonStream {
-    if (!(data instanceof Array)) {
-      throw new Error('transformJson must return an array of objects');
+  #sendJson(records: O[]): JsonStream {
+    if (!(records instanceof Array)) {
+      throw new Error('transformations must return an array of PipelineRecord');
     }
 
     let written = 0;
     const encoder = new TextEncoder();
     const readable = new ReadableStream<Uint8Array>({
       start(controller): void {
-        for (const obj of data) {
-          const encoded = encoder.encode(`${JSON.stringify(obj)}\n`);
+        for (const record of records) {
+          const encoded = encoder.encode(`${JSON.stringify(record)}\n`);
           written += encoded.length;
           controller.enqueue(encoded);
         }
@@ -147,7 +167,7 @@ export class PipelineTransformImpl extends entrypoints.WorkerEntrypoint {
       format: Format.JSON_STREAM,
       size: {
         bytes: written,
-        rows: data.length,
+        rows: records.length,
       },
       data: readable,
     };

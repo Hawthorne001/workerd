@@ -79,7 +79,7 @@ To build `workerd`, you need:
   * LLD 16+ (e.g. package `lld-16`).
   * `python3`, `python3-distutils`, and `tcl8.6`
 * On macOS:
-  * Xcode 15 installation (available on macOS 13 and higher). **Full Xcode is required**, the Xcode command line tools alone are **not sufficient** for building.
+  * Xcode 16 installation (available on macOS 14 and higher). **Full Xcode is required**, the Xcode command line tools alone are **not sufficient** for building.
   * Homebrew installed `tcl-tk` package (provides Tcl 8.6)
 * On Windows:
   * Install [App Installer](https://learn.microsoft.com/en-us/windows/package-manager/winget/#install-winget)
@@ -178,7 +178,7 @@ For more details about command-line usage, use `workerd --help`.
 Prebuilt binaries are distributed via `npm`. Run `npx workerd ...` to use these. If you're running a prebuilt binary, you'll need to make sure your system has the right dependencies installed:
 
 * On Linux:
-  * glibc 2.31 or higher (already included on e.g. Ubuntu 20.04, Debian Bullseye)
+  * glibc 2.35 or higher (already included on e.g. Ubuntu 22.04, Debian Bookworm)
 * On macOS:
   * macOS 13.5 or higher
   * The Xcode command line tools, which can be installed with `xcode-select --install`
@@ -186,7 +186,13 @@ Prebuilt binaries are distributed via `npm`. Run `npx workerd ...` to use these.
 
 ### Local Worker development with `wrangler`
 
-You can use [Wrangler](https://developers.cloudflare.com/workers/wrangler/) (v3.0 or greater) to develop Cloudflare Workers locally, using `workerd`. Run:
+You can use [Wrangler](https://developers.cloudflare.com/workers/wrangler/) (v3.0 or greater) to develop Cloudflare Workers locally, using `workerd`. First, run the following command to configure Miniflare to use this build of `workerd`.
+
+```
+$ export MINIFLARE_WORKERD_PATH="<WORKERD_REPO_DIR>/bazel-bin/src/workerd/server/workerd"
+```
+
+Then, run:
 
 `wrangler dev`
 

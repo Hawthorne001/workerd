@@ -20,6 +20,7 @@
 -isystem/usr/lib/llvm-16/include/c++/v1
 -isystem/usr/lib/llvm-16/lib/clang/16/include
 -isystem/usr/include/x86_64-linux-gnu
+-isystem/usr/include/aarch64-linux-gnu
 -isystem/usr/include
 -isystem/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1
 -isystem/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/16/include
@@ -50,6 +51,7 @@
 -isystembazel-bin/src/rust/cxx-integration/_virtual_includes/cxx-include/
 -isystembazel-bin/src/rust/cxx-integration/_virtual_includes/cxx-integration@cxx
 -isystembazel-bin/src/rust/cxx-integration-test/_virtual_includes/cxx-integration-test@cxx
+-isystembazel-bin/src/rust/dns/_virtual_includes/dns@cxx
 -D_FORTIFY_SOURCE=1
 -D_LIBCPP_REMOVE_TRANSITIVE_INCLUDES
 -D_LIBCPP_NO_ABI_TAG
@@ -88,6 +90,8 @@
 -DV8_ENABLE_CHECKS
 -DV8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
 -DV8_ENABLE_LAZY_SOURCE_POSITIONS
+-DV8_ENABLE_MAGLEV
+-DV8_ENABLE_SPARKPLUG
 -DV8_ENABLE_TURBOFAN
 -DV8_ENABLE_WEBASSEMBLY
 -DV8_HAVE_TARGET_OS
@@ -96,7 +100,6 @@
 -DV8_TARGET_ARCH_X64
 -DV8_TARGET_OS_LINUX
 -DV8_TYPED_ARRAY_MAX_SIZE_IN_HEAP=64
--DV8_USE_PERFETTO
 -DWORKERD_USE_PERFETTO
 -DPERFETTO_ENABLE_LEGACY_TRACE_EVENTS=1
 -DWORKERD_ICU_DATA_EMBED

@@ -82,7 +82,8 @@
   F("node", EW_NODE_ISOLATE_TYPES)                                                                 \
   F("rtti", EW_RTTI_ISOLATE_TYPES)                                                                 \
   F("webgpu", EW_WEBGPU_ISOLATE_TYPES)                                                             \
-  F("eventsource", EW_EVENTSOURCE_ISOLATE_TYPES)
+  F("eventsource", EW_EVENTSOURCE_ISOLATE_TYPES)                                                   \
+  F("container", EW_CONTAINER_ISOLATE_TYPES)
 
 namespace workerd::api {
 
@@ -189,7 +190,7 @@ CompatibilityFlags::Reader compileAllFlags(capnp::MessageBuilder &message) {
 }
 
 struct TypesEncoder {
-public:
+ public:
   TypesEncoder(): compatFlags(kj::heapArray<kj::String>(0)) {}
   TypesEncoder(kj::String compatDate, kj::Array<kj::String> compatFlags)
       : compatDate(kj::mv(compatDate)),
@@ -246,7 +247,7 @@ public:
     return kj::heapArray(bytes);
   }
 
-private:
+ private:
   template <typename Type>
   void writeStructure(jsg::rtti::Builder<CompatibilityFlags::Reader> &builder,
       capnp::List<jsg::rtti::Structure>::Builder structures) {

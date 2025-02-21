@@ -37,6 +37,17 @@ wd_cc_library(
 )
 
 wd_cc_library(
+    name = "trace-stream",
+    srcs = ["trace-stream.c++"],
+    hdrs = ["trace-stream.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":io",
+        "//src/workerd/util:completion-membrane",
+    ],
+)
+
+wd_cc_library(
     name = "io",
     # HACK: Currently, the `io` and `api` packages are interdependent. We fold all the sources
     #   from `api` into `io`. In principle, it should be possible to pull them apart so `api`
@@ -69,6 +80,16 @@ wd_cc_library(
         ":set_enable_experimental_webgpu": ["//src/workerd/api/gpu:hdrs"],
         "//conditions:default": [],
     }),
+    # global CPU-specific options are inconvenient to specify with bazel – just set the options we
+    # need for CRC32C in this target for now.
+    copts = select({
+        "@platforms//cpu:aarch64": [
+            "-mcrc",
+        ],
+        "@platforms//cpu:x86_64": [
+            "-msse4.2",
+        ],
+    }),
     defines = select({
         ":set_enable_experimental_webgpu": ["WORKERD_EXPERIMENTAL_ENABLE_WEBGPU"],
         "//conditions:default": [],
@@ -87,6 +108,8 @@ wd_cc_library(
         ":actor-id",
         ":actor-storage_capnp",
         ":cdp_capnp",
+        ":container_capnp",
+        ":frankenvalue",
         ":io-gate",
         ":io-helpers",
         ":limit-enforcer",
@@ -94,21 +117,23 @@ wd_cc_library(
         ":supported-compatibility-date_capnp",
         ":trace",
         ":worker-interface",
-        "//src/cloudflare",
-        "//src/node",
         "//src/workerd/api:analytics-engine_capnp",
         "//src/workerd/api:data-url",
         "//src/workerd/api:deferred-proxy",
         "//src/workerd/api:encoding",
         "//src/workerd/api:url",
+        "//src/workerd/api:urlpattern",
         "//src/workerd/jsg",
         "//src/workerd/util:autogate",
+        "//src/workerd/util:completion-membrane",
+        "//src/workerd/util:exception",
         "//src/workerd/util:sqlite",
         "//src/workerd/util:thread-scopes",
         "//src/workerd/util:uuid",
         "@capnp-cpp//src/capnp:capnp-rpc",
         "@capnp-cpp//src/capnp/compat:http-over-capnp",
         "@capnp-cpp//src/kj:kj-async",
+        "@ncrypto",
         "@ssl",
     ] + select({
         ":set_enable_experimental_webgpu": ["@dawn"],
@@ -145,6 +170,18 @@ wd_cc_library(
 )
 
 wd_cc_library(
+    name = "frankenvalue",
+    srcs = ["frankenvalue.c++"],
+    hdrs = ["frankenvalue.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":frankenvalue_capnp",
+        "//src/workerd/jsg",
+        "@capnp-cpp//src/capnp:capnpc",
+    ],
+)
+
+wd_cc_library(
     name = "trace",
     srcs = ["trace.c++"],
     hdrs = ["trace.h"],
@@ -153,6 +190,7 @@ wd_cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":trace_capnp",
         ":worker-interface_capnp",
         "//src/workerd/jsg:memory-tracker",
         "//src/workerd/util",
@@ -217,6 +255,7 @@ wd_cc_library(
     hdrs = ["worker-interface.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":frankenvalue_capnp",
         ":worker-interface_capnp",
         "@capnp-cpp//src/capnp:capnp-rpc",
         "@capnp-cpp//src/capnp:capnpc",
@@ -259,6 +298,7 @@ wd_capnp_library(
     deps = [
         ":outcome_capnp",
         ":script-version_capnp",
+        ":trace_capnp",
         "@capnp-cpp//src/capnp/compat:http-over-capnp_capnp",
     ],
 )
@@ -269,9 +309,20 @@ wd_capnp_library(src = "outcome.capnp")
 
 wd_capnp_library(src = "script-version.capnp")
 
+wd_capnp_library(src = "trace.capnp")
+
 wd_capnp_library(src = "compatibility-date.capnp")
 
 wd_capnp_library(src = "features.capnp")
+
+wd_capnp_library(src = "frankenvalue.capnp")
+
+wd_capnp_library(
+    src = "container.capnp",
+    deps = [
+        "@capnp-cpp//src/capnp/compat:byte-stream_capnp",
+    ],
+)
 
 kj_test(
     src = "io-gate-test.c++",
@@ -325,5 +376,13 @@ kj_test(
     src = "trace-test.c++",
     deps = [
         ":trace",
+        "//src/workerd/util:thread-scopes",
+    ],
+)
+
+kj_test(
+    src = "frankenvalue-test.c++",
+    deps = [
+        ":frankenvalue",
     ],
 )

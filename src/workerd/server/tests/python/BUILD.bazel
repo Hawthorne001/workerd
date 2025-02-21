@@ -1,5 +1,5 @@
 load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
-load("//:build/pyodide_bucket.bzl", "PYODIDE_IMPORTS_TO_TEST")
+load("//:build/python_metadata.bzl", "PYTHON_IMPORTS_TO_TEST", "PYTHON_LOCKFILES", "PYTHON_VERSION_TO_PACKAGES")
 load("//src/workerd/server/tests/python:import_tests.bzl", "gen_import_tests")
 load("//src/workerd/server/tests/python:py_wd_test.bzl", "py_wd_test")
 
@@ -11,61 +11,73 @@ copy_file(
     name = "pyodide_dev.capnp.bin@rule",
     src = "//src/pyodide:pyodide.capnp.bin",
     out = "pyodide-bundle-cache/pyodide_dev.capnp.bin",
+    visibility = ["//visibility:public"],
 )
+
+py_wd_test("hello")
+
+py_wd_test("env-param")
 
 py_wd_test(
-    src = "hello/hello.wd-test",
-    args = ["--experimental"],
-    data = glob(
-        [
-            "hello/*",
-        ],
-        exclude = ["**/*.wd-test"],
-    ),
+    "asgi",
+    # TODO: investigate failure!
+    make_snapshot = False,
+    skip_python_flags = ["0.27.1"],
 )
+
+py_wd_test("random")
+
+py_wd_test("subdirectory")
 
 py_wd_test(
-    src = "sdk/sdk.wd-test",
-    args = ["--experimental"],
-    data = glob(
-        [
-            "sdk/*",
-        ],
-        exclude = ["**/*.wd-test"],
-    ),
+    "sdk",
+    tags = [
+        # TODO(someday): Fix asan failure for this, see https://github.com/cloudflare/workerd/pull/3140#discussion_r1858273318
+        "no-asan",
+    ],
 )
+
+py_wd_test("seek-metadatafs")
+
+[
+    gen_import_tests(
+        PYTHON_IMPORTS_TO_TEST[package_version],
+        python_version,
+        # TODO: Micropip version mismatch for 0.27.0
+        #
+        # TODO: The packages below don't currently work in the latest package/python versions. Need
+        # to fix them.
+        pkg_skip_versions = {
+            "0.27.1": [
+                "micropip",
+                "langchain-core",
+                "langchain_openai",
+                "langsmith",
+                "PyJWT",
+                "beautifulsoup4",
+                "cffi",
+                "cryptography",
+                "pycparser",
+                "python-multipart",
+                "soupsieve",
+                "sqlalchemy",
+                "starlette",
+                "tblib",
+            ],
+        },
+    )
+    for python_version, package_version in PYTHON_VERSION_TO_PACKAGES.items()
+]
 
 py_wd_test(
-    src = "env-param/env.wd-test",
-    args = ["--experimental"],
-    data = glob(
-        [
-            "env-param/*",
-        ],
-        exclude = ["**/*.wd-test"],
-    ),
+    "undefined-handler",
+    # TODO: Requires a new bundle deploy
+    skip_python_flags = [
+        "0.26.0a2",
+        "0.27.1",
+    ],
 )
 
-py_wd_test(
-    src = "random/random.wd-test",
-    args = ["--experimental"],
-    data = glob(
-        [
-            "random/*",
-        ],
-        exclude = ["**/*.wd-test"],
-    ),
-)
+py_wd_test("dont-snapshot-pyodide")
 
-py_wd_test(
-    src = "subdirectory/subdirectory.wd-test",
-    args = ["--experimental"],
-    data = glob(
-        [
-            "subdirectory/**",
-        ],
-        exclude = ["**/*.wd-test"],
-    ),
-)
-
-gen_import_tests(PYODIDE_IMPORTS_TO_TEST)
+py_wd_test("filter-non-py-files")

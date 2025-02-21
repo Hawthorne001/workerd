@@ -29,7 +29,7 @@ namespace {
 //   - Or, falling back to proxying if passThroughOnException() was used.
 // - Finish waitUntil() tasks.
 class WorkerEntrypoint final: public WorkerInterface {
-public:
+ public:
   // Call this instead of the constructor. It actually adds a wrapper object around the
   // `WorkerEntrypoint`, but the wrapper still implements `WorkerInterface`.
   //
@@ -45,6 +45,7 @@ public:
   static kj::Own<WorkerInterface> construct(ThreadContext& threadContext,
       kj::Own<const Worker> worker,
       kj::Maybe<kj::StringPtr> entrypointName,
+      Frankenvalue props,
       kj::Maybe<kj::Own<Worker::Actor>> actor,
       kj::Own<LimitEnforcer> limitEnforcer,
       kj::Own<void> ioContextDependency,
@@ -53,7 +54,8 @@ public:
       kj::TaskSet& waitUntilTasks,
       bool tunnelExceptions,
       kj::Maybe<kj::Own<WorkerTracer>> workerTracer,
-      kj::Maybe<kj::String> cfBlobJson);
+      kj::Maybe<kj::String> cfBlobJson,
+      kj::Maybe<tracing::InvocationSpanContext> maybeTriggerInvocationSpan);
 
   kj::Promise<void> request(kj::HttpMethod method,
       kj::StringPtr url,
@@ -71,7 +73,7 @@ public:
   kj::Promise<bool> test() override;
   kj::Promise<CustomEvent::Result> customEvent(kj::Own<CustomEvent> event) override;
 
-private:
+ private:
   class ResponseSentTracker;
 
   // Members initialized at startup.
@@ -81,6 +83,7 @@ private:
   kj::Maybe<kj::Own<IoContext::IncomingRequest>> incomingRequest;
   bool tunnelExceptions;
   kj::Maybe<kj::StringPtr> entrypointName;
+  Frankenvalue props;
   kj::Maybe<kj::String> cfBlobJson;
 
   // Hacky members used to hold some temporary state while processing a request.
@@ -96,7 +99,8 @@ private:
       kj::Own<void> ioContextDependency,
       kj::Own<IoChannelFactory> ioChannelFactory,
       kj::Own<RequestObserver> metrics,
-      kj::Maybe<kj::Own<WorkerTracer>> workerTracer);
+      kj::Maybe<kj::Own<WorkerTracer>> workerTracer,
+      tracing::InvocationSpanContext invocationSpanContext);
 
   template <typename T>
   kj::Promise<T> maybeAddGcPassForTest(IoContext& context, kj::Promise<T> promise);
@@ -106,19 +110,20 @@ private:
       kj::Date scheduledTime,
       uint32_t retryCount);
 
-public:  // For kj::heap() only; pretend this is private.
+ public:  // For kj::heap() only; pretend this is private.
   WorkerEntrypoint(kj::Badge<WorkerEntrypoint> badge,
       ThreadContext& threadContext,
       kj::TaskSet& waitUntilTasks,
       bool tunnelExceptions,
       kj::Maybe<kj::StringPtr> entrypointName,
+      Frankenvalue props,
       kj::Maybe<kj::String> cfBlobJson);
 };
 
 // Simple wrapper around `HttpService::Response` to let us know if the response was sent
 // already.
 class WorkerEntrypoint::ResponseSentTracker final: public kj::HttpService::Response {
-public:
+ public:
   ResponseSentTracker(kj::HttpService::Response& inner): inner(inner) {}
   KJ_DISALLOW_COPY_AND_MOVE(ResponseSentTracker);
 
@@ -142,7 +147,7 @@ public:
     return inner.acceptWebSocket(headers);
   }
 
-private:
+ private:
   kj::HttpService::Response& inner;
   bool sent = false;
 };
@@ -150,6 +155,7 @@ private:
 kj::Own<WorkerInterface> WorkerEntrypoint::construct(ThreadContext& threadContext,
     kj::Own<const Worker> worker,
     kj::Maybe<kj::StringPtr> entrypointName,
+    Frankenvalue props,
     kj::Maybe<kj::Own<Worker::Actor>> actor,
     kj::Own<LimitEnforcer> limitEnforcer,
     kj::Own<void> ioContextDependency,
@@ -158,12 +164,21 @@ kj::Own<WorkerInterface> WorkerEntrypoint::construct(ThreadContext& threadContex
     kj::TaskSet& waitUntilTasks,
     bool tunnelExceptions,
     kj::Maybe<kj::Own<WorkerTracer>> workerTracer,
-    kj::Maybe<kj::String> cfBlobJson) {
+    kj::Maybe<kj::String> cfBlobJson,
+    kj::Maybe<tracing::InvocationSpanContext> maybeTriggerInvocationSpan) {
   TRACE_EVENT("workerd", "WorkerEntrypoint::construct()");
+
+  // Create a new InvocationSpanContext for this worker invocation.
+  auto invocationSpanContext = tracing::InvocationSpanContext::newForInvocation(
+      maybeTriggerInvocationSpan.map(
+          [](auto& trigger) -> tracing::InvocationSpanContext& { return trigger; }),
+      threadContext.getEntropySource());
+
   auto obj = kj::heap<WorkerEntrypoint>(kj::Badge<WorkerEntrypoint>(), threadContext,
-      waitUntilTasks, tunnelExceptions, entrypointName, kj::mv(cfBlobJson));
+      waitUntilTasks, tunnelExceptions, entrypointName, kj::mv(props), kj::mv(cfBlobJson));
   obj->init(kj::mv(worker), kj::mv(actor), kj::mv(limitEnforcer), kj::mv(ioContextDependency),
-      kj::mv(ioChannelFactory), kj::addRef(*metrics), kj::mv(workerTracer));
+      kj::mv(ioChannelFactory), kj::addRef(*metrics), kj::mv(workerTracer),
+      kj::mv(invocationSpanContext));
   auto& wrapper = metrics->wrapWorkerInterface(*obj);
   return kj::attachRef(wrapper, kj::mv(obj), kj::mv(metrics));
 }
@@ -173,11 +188,13 @@ WorkerEntrypoint::WorkerEntrypoint(kj::Badge<WorkerEntrypoint> badge,
     kj::TaskSet& waitUntilTasks,
     bool tunnelExceptions,
     kj::Maybe<kj::StringPtr> entrypointName,
+    Frankenvalue props,
     kj::Maybe<kj::String> cfBlobJson)
     : threadContext(threadContext),
       waitUntilTasks(waitUntilTasks),
       tunnelExceptions(tunnelExceptions),
       entrypointName(entrypointName),
+      props(kj::mv(props)),
       cfBlobJson(kj::mv(cfBlobJson)) {}
 
 void WorkerEntrypoint::init(kj::Own<const Worker> worker,
@@ -186,7 +203,8 @@ void WorkerEntrypoint::init(kj::Own<const Worker> worker,
     kj::Own<void> ioContextDependency,
     kj::Own<IoChannelFactory> ioChannelFactory,
     kj::Own<RequestObserver> metrics,
-    kj::Maybe<kj::Own<WorkerTracer>> workerTracer) {
+    kj::Maybe<kj::Own<WorkerTracer>> workerTracer,
+    tracing::InvocationSpanContext invocationSpanContext) {
   TRACE_EVENT("workerd", "WorkerEntrypoint::init()");
   // We need to construct the IoContext -- unless this is an actor and it already has a
   // IoContext, in which case we reuse it.
@@ -211,8 +229,8 @@ void WorkerEntrypoint::init(kj::Own<const Worker> worker,
     context = newContext();
   }
 
-  incomingRequest = kj::heap<IoContext::IncomingRequest>(
-      kj::mv(context), kj::mv(ioChannelFactory), kj::mv(metrics), kj::mv(workerTracer))
+  incomingRequest = kj::heap<IoContext::IncomingRequest>(kj::mv(context), kj::mv(ioChannelFactory),
+      kj::mv(metrics), kj::mv(workerTracer), kj::mv(invocationSpanContext))
                         .attach(kj::mv(actor));
 }
 
@@ -254,12 +272,17 @@ kj::Promise<void> WorkerEntrypoint::request(kj::HttpMethod method,
       slot.add(value);
     });
     auto traceHeadersArray = KJ_MAP(entry, traceHeaders) {
-      return Trace::FetchEventInfo::Header(kj::mv(entry.key), kj::strArray(entry.value, ", "));
+      return tracing::FetchEventInfo::Header(kj::mv(entry.key), kj::strArray(entry.value, ", "));
     };
 
     t.setEventInfo(timestamp,
-        Trace::FetchEventInfo(method, kj::str(url), kj::mv(cfJson), kj::mv(traceHeadersArray)));
+        tracing::FetchEventInfo(method, kj::str(url), kj::mv(cfJson), kj::mv(traceHeadersArray)));
   }
+
+  context.getMetrics().reportTailEvent(context, [&] {
+    return tracing::Onset(tracing::FetchEventInfo(method, kj::str(url), kj::str("{}"), nullptr),
+        tracing::Onset::WorkerInfo{}, kj::none);
+  });
 
   auto metricsForCatch = kj::addRef(incomingRequest->getMetrics());
   auto metricsForProxyTask = kj::addRef(incomingRequest->getMetrics());
@@ -276,7 +299,8 @@ kj::Promise<void> WorkerEntrypoint::request(kj::HttpMethod method,
     jsg::AsyncContextFrame::StorageScope traceScope = context.makeAsyncTraceScope(lock);
 
     return lock.getGlobalScope().request(method, url, headers, requestBody, wrappedResponse,
-        cfBlobJson, lock, lock.getExportedHandler(entrypointName, context.getActor()));
+        cfBlobJson, lock,
+        lock.getExportedHandler(entrypointName, kj::mv(props), context.getActor()));
   })
       .then([this](api::DeferredProxy<void> deferredProxy) {
     TRACE_EVENT("workerd", "WorkerEntrypoint::request() deferred proxy step",
@@ -476,20 +500,26 @@ kj::Promise<WorkerInterface::ScheduledResult> WorkerEntrypoint::runScheduled(
   // calling context->drain(). We don't ever send scheduled events to actors. If we do, we'll have
   // to think more about this.
 
+  double eventTime = (scheduledTime - kj::UNIX_EPOCH) / kj::MILLISECONDS;
+
   KJ_IF_SOME(t, context.getWorkerTracer()) {
-    double eventTime = (scheduledTime - kj::UNIX_EPOCH) / kj::MILLISECONDS;
-    t.setEventInfo(context.now(), Trace::ScheduledEventInfo(eventTime, kj::str(cron)));
+    t.setEventInfo(context.now(), tracing::ScheduledEventInfo(eventTime, kj::str(cron)));
   }
 
+  context.getMetrics().reportTailEvent(context, [&] {
+    return tracing::Onset(tracing::ScheduledEventInfo(eventTime, kj::str(cron)),
+        tracing::Onset::WorkerInfo{}, kj::none);
+  });
+
   // Scheduled handlers run entirely in waitUntil() tasks.
-  context.addWaitUntil(
-      context.run([scheduledTime, cron, entrypointName = entrypointName, &context,
-                      &metrics = incomingRequest->getMetrics()](Worker::Lock& lock) mutable {
+  context.addWaitUntil(context.run(
+      [scheduledTime, cron, entrypointName = entrypointName, props = kj::mv(props), &context,
+          &metrics = incomingRequest->getMetrics()](Worker::Lock& lock) mutable {
     TRACE_EVENT("workerd", "WorkerEntrypoint::runScheduled() run");
     jsg::AsyncContextFrame::StorageScope traceScope = context.makeAsyncTraceScope(lock);
 
-    lock.getGlobalScope().startScheduled(
-        scheduledTime, cron, lock, lock.getExportedHandler(entrypointName, context.getActor()));
+    lock.getGlobalScope().startScheduled(scheduledTime, cron, lock,
+        lock.getExportedHandler(entrypointName, kj::mv(props), context.getActor()));
   }));
 
   static auto constexpr waitForFinished = [](IoContext& context,
@@ -536,8 +566,12 @@ kj::Promise<WorkerInterface::AlarmResult> WorkerEntrypoint::runAlarmImpl(
   incomingRequest->delivered();
 
   KJ_IF_SOME(t, incomingRequest->getWorkerTracer()) {
-    t.setEventInfo(context.now(), Trace::AlarmEventInfo(scheduledTime));
+    t.setEventInfo(context.now(), tracing::AlarmEventInfo(scheduledTime));
   }
+  context.getMetrics().reportTailEvent(context, [&] {
+    return tracing::Onset(
+        tracing::AlarmEventInfo(scheduledTime), tracing::Onset::WorkerInfo{}, kj::none);
+  });
 
   auto scheduleAlarmResult = co_await actor.scheduleAlarm(scheduledTime);
   KJ_SWITCH_ONEOF(scheduleAlarmResult) {
@@ -557,7 +591,7 @@ kj::Promise<WorkerInterface::AlarmResult> WorkerEntrypoint::runAlarmImpl(
       try {
         auto result =
             co_await context.run([scheduledTime, retryCount, entrypointName = entrypointName,
-                                     &context](Worker::Lock& lock) {
+                                     props = kj::mv(props), &context](Worker::Lock& lock) mutable {
           jsg::AsyncContextFrame::StorageScope traceScope = context.makeAsyncTraceScope(lock);
 
           // If we have an invalid timeout, set it to the default value of 15 minutes.
@@ -567,7 +601,7 @@ kj::Promise<WorkerInterface::AlarmResult> WorkerEntrypoint::runAlarmImpl(
             timeout = 15 * kj::MINUTES;
           }
 
-          auto handler = lock.getExportedHandler(entrypointName, context.getActor());
+          auto handler = lock.getExportedHandler(entrypointName, kj::mv(props), context.getActor());
           return lock.getGlobalScope().runAlarm(scheduledTime, timeout, retryCount, lock, handler);
         });
 
@@ -626,15 +660,15 @@ kj::Promise<bool> WorkerEntrypoint::test() {
 
   auto& context = incomingRequest->getContext();
 
-  context.addWaitUntil(context.run(
-      [entrypointName = entrypointName, &context, &metrics = incomingRequest->getMetrics()](
-          Worker::Lock& lock) mutable -> kj::Promise<void> {
+  context.addWaitUntil(context.run([entrypointName = entrypointName, props = kj::mv(props),
+                                       &context, &metrics = incomingRequest->getMetrics()](
+                                       Worker::Lock& lock) mutable -> kj::Promise<void> {
     TRACE_EVENT("workerd", "WorkerEntrypoint::test() run");
     jsg::AsyncContextFrame::StorageScope traceScope = context.makeAsyncTraceScope(lock);
 
     return context.awaitJs(lock,
         lock.getGlobalScope().test(
-            lock, lock.getExportedHandler(entrypointName, context.getActor())));
+            lock, lock.getExportedHandler(entrypointName, kj::mv(props), context.getActor())));
   }));
 
   static auto constexpr waitForFinished =
@@ -657,8 +691,8 @@ kj::Promise<WorkerInterface::CustomEvent::Result> WorkerEntrypoint::customEvent(
   this->incomingRequest = kj::none;
 
   auto& context = incomingRequest->getContext();
-  auto promise =
-      event->run(kj::mv(incomingRequest), entrypointName, waitUntilTasks).attach(kj::mv(event));
+  auto promise = event->run(kj::mv(incomingRequest), entrypointName, kj::mv(props), waitUntilTasks)
+                     .attach(kj::mv(event));
 
   // TODO(cleanup): In theory `context` may have been destroyed by now if `event->run()` dropped
   //   the `incomingRequest` synchronously. No current implementation does that, and
@@ -708,6 +742,7 @@ kj::Promise<T> WorkerEntrypoint::maybeAddGcPassForTest(IoContext& context, kj::P
 kj::Own<WorkerInterface> newWorkerEntrypoint(ThreadContext& threadContext,
     kj::Own<const Worker> worker,
     kj::Maybe<kj::StringPtr> entrypointName,
+    Frankenvalue props,
     kj::Maybe<kj::Own<Worker::Actor>> actor,
     kj::Own<LimitEnforcer> limitEnforcer,
     kj::Own<void> ioContextDependency,
@@ -716,10 +751,12 @@ kj::Own<WorkerInterface> newWorkerEntrypoint(ThreadContext& threadContext,
     kj::TaskSet& waitUntilTasks,
     bool tunnelExceptions,
     kj::Maybe<kj::Own<WorkerTracer>> workerTracer,
-    kj::Maybe<kj::String> cfBlobJson) {
+    kj::Maybe<kj::String> cfBlobJson,
+    kj::Maybe<tracing::InvocationSpanContext> maybeTriggerInvocationSpan) {
   return WorkerEntrypoint::construct(threadContext, kj::mv(worker), kj::mv(entrypointName),
-      kj::mv(actor), kj::mv(limitEnforcer), kj::mv(ioContextDependency), kj::mv(ioChannelFactory),
-      kj::mv(metrics), waitUntilTasks, tunnelExceptions, kj::mv(workerTracer), kj::mv(cfBlobJson));
+      kj::mv(props), kj::mv(actor), kj::mv(limitEnforcer), kj::mv(ioContextDependency),
+      kj::mv(ioChannelFactory), kj::mv(metrics), waitUntilTasks, tunnelExceptions,
+      kj::mv(workerTracer), kj::mv(cfBlobJson), kj::mv(maybeTriggerInvocationSpan));
 }
 
 }  // namespace workerd

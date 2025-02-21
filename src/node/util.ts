@@ -2,7 +2,7 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 
-/* todo: the following is adopted code, enabling linting one day */
+/* TODO: the following is adopted code, enabling linting one day */
 /* eslint-disable */
 
 import { default as internalTypes } from 'node-internal:internal_types';
@@ -19,10 +19,7 @@ import { debuglog } from 'node-internal:debuglog';
 export const debug = debuglog;
 export { debuglog };
 
-import {
-  ERR_FALSY_VALUE_REJECTION,
-  ERR_INVALID_ARG_TYPE,
-} from 'node-internal:internal_errors';
+import { ERR_INVALID_ARG_TYPE } from 'node-internal:internal_errors';
 
 import {
   inspect,
@@ -30,56 +27,18 @@ import {
   formatWithOptions,
   stripVTControlCharacters,
 } from 'node-internal:internal_inspect';
-export { inspect, format, formatWithOptions, stripVTControlCharacters };
 
+import { callbackify } from 'node-internal:internal_utils';
+export { inspect, format, formatWithOptions, stripVTControlCharacters };
+export { callbackify } from 'node-internal:internal_utils';
 export const types = internalTypes;
 
 export const { MIMEParams, MIMEType } = utilImpl;
 
-const callbackifyOnRejected = (reason: unknown, cb: Function) => {
-  if (!reason) {
-    reason = new ERR_FALSY_VALUE_REJECTION(`${reason}`);
-  }
-  return cb(reason);
-};
-
-export function callbackify<T extends (...args: any[]) => Promise<any>>(
-  original: T
-): T extends (...args: infer TArgs) => Promise<infer TReturn>
-  ? (...params: [...TArgs, (err: Error, ret: TReturn) => any]) => void
-  : never {
-  validateFunction(original, 'original');
-
-  function callbackified(
-    this: unknown,
-    ...args: [...unknown[], (err: unknown, ret: unknown) => void]
-  ): any {
-    const maybeCb = args.pop();
-    validateFunction(maybeCb, 'last argument');
-    const cb = (maybeCb as Function).bind(this);
-    Reflect.apply(original, this, args).then(
-      (ret: any) => queueMicrotask(() => cb(null, ret)),
-      (rej: any) => queueMicrotask(() => callbackifyOnRejected(rej, cb))
-    );
-  }
-
-  const descriptors = Object.getOwnPropertyDescriptors(original);
-  if (typeof descriptors['length']!.value === 'number') {
-    descriptors['length']!.value++;
-  }
-  if (typeof descriptors['name']!.value === 'string') {
-    descriptors['name']!.value += 'Callbackified';
-  }
-  const propertiesValues = Object.values(descriptors);
-  for (let i = 0; i < propertiesValues.length; i++) {
-    Object.setPrototypeOf(propertiesValues[i], null);
-  }
-  Object.defineProperties(callbackified, descriptors);
-  return callbackified as any;
-}
-
 const kCustomPromisifiedSymbol = Symbol.for('nodejs.util.promisify.custom');
-const kCustomPromisifyArgsSymbol = Symbol('customPromisifyArgs');
+const kCustomPromisifyArgsSymbol = Symbol.for(
+  'nodejs.util.promisify.custom.args'
+);
 
 // TODO(later): Proper type signature for promisify.
 export function promisify(original: Function): Function {
@@ -220,9 +179,9 @@ export async function aborted(signal: AbortSignal, resource: object) {
   if (signal === undefined) {
     throw new ERR_INVALID_ARG_TYPE('signal', 'AbortSignal', signal);
   }
-  // Node.js defines that the resource is held weakly such that if it is gc'd, we
+  // Node.js defines that the resource is held weakly such that if it is GC'ed, we
   // will drop the event handler on the signal and the promise will remain pending
-  // forever. We don't want gc to be observable in the same way so we won't support
+  // forever. We don't want GC to be observable in the same way so we won't support
   // this additional option. Unfortunately Node.js does not make this argument optional.
   // We'll just ignore it.
   validateAbortSignal(signal, 'signal');
@@ -249,16 +208,41 @@ export function deprecate(
   return fn;
 }
 
-export function getCallSite(frames: number = 10) {
-  return utilImpl.getCallSite(frames);
-}
+// Node.js originally introduced the API with the name `getCallSite()` as an experimental
+// API but then renamed it to `getCallSites()` soon after. We had already implemented the
+// API with the original name in a release. To avoid the possibility of breaking, we export
+// the function using both names.
+export const getCallSite = utilImpl.getCallSites.bind(utilImpl);
+export const getCallSites = utilImpl.getCallSites.bind(utilImpl);
 
 export function isDeepStrictEqual(a: unknown, b: unknown): boolean {
   return _isDeepStrictEqual(a, b);
 }
 
-export function isArray(a: unknown): boolean {
+export function isArray(a: unknown): a is Array<any> {
   return Array.isArray(a);
+}
+
+export function parseEnv(): void {
+  // We don't implement this function yet because it is currently under
+  // active development. We should implement it when it's stable
+  throw new Error('node:util parseEnv is not implemented');
+}
+
+export function getSystemErrorMap(): void {
+  throw new Error('node:util getSystemErrorMap is not implemented');
+}
+
+export function getSystemErrorName(): void {
+  throw new Error('node:util getSystemErrorName is not implemented');
+}
+
+export function getSystemErrorMessage(): void {
+  throw new Error('node:util getSystemErrorMessage is not implemented');
+}
+
+export function styleText(): void {
+  throw new Error('node:util styleText is not implemented');
 }
 
 export default {
@@ -279,44 +263,20 @@ export default {
   debuglog,
   debug,
   deprecate,
+  getSystemErrorMap,
+  getSystemErrorMessage,
+  getSystemErrorName,
   // Node.js originally exposed TextEncoder and TextDecoder off the util
   // module originally, so let's just go ahead and do the same.
   TextEncoder,
   TextDecoder,
-  // We currently have no plans to implement the following APIs but we want
-  // to provide throwing placeholders for them. We may eventually come back
-  // around and implement these later.
   parseArgs,
+  parseEnv,
+  styleText,
   transferableAbortController,
   transferableAbortSignal,
   getCallSite,
+  getCallSites,
   isDeepStrictEqual,
   isArray,
 };
-
-// Node.js util APIs we're currently not supporting
-//
-// The following functions doesn't make sense for Workerd to support in runtime.
-//   * util._errnoException
-//   * util._exceptionWithHostPort
-//   * util.getSystemErrorMap
-//   * util.getSystemErrorName
-//   * util.parseEnv
-// The following functions are removed from Node.js, and only supported using
-// a polyfill.
-//   * util.isBoolean
-//   * util.isBuffer
-//   * util.isDate
-//   * util.isError
-//   * util.isFunction
-//   * util.isNull
-//   * util.isNullOrUndefined
-//   * util.isNumber
-//   * util.isObject
-//   * util.isPrimitive
-//   * util.isRegExp
-//   * util.isString
-//   * util.isSymbol
-//   * util.isUndefined
-// TODO:
-//   * util.styleText

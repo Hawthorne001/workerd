@@ -72,7 +72,7 @@ using BufferSourceViewConstructor = v8::Local<v8::Value> (*)(Lock&, BackingStore
 // The BackingStore can be safely used outside of the isolate lock and can even be passed
 // into another isolate if necessary.
 class BackingStore {
-public:
+ public:
   template <BufferSourceType T = v8::Uint8Array>
   static BackingStore from(kj::Array<kj::byte> data) {
     // Creates a new BackingStore that takes over ownership of the given kj::Array.
@@ -208,11 +208,19 @@ public:
     return BackingStore(backingStore, byteLength, byteOffset, elementSize, ctor, integerType);
   }
 
+  template <class T = v8::Uint8Array>
+  inline BackingStore copy(jsg::Lock& js) {
+    if (byteLength == 0) return BackingStore::alloc<T>(js, 0);
+    auto dest = BackingStore::alloc<T>(js, byteLength);
+    memcpy(dest.asArrayPtr().begin(), asArrayPtr().begin(), byteLength);
+    return dest;
+  }
+
   JSG_MEMORY_INFO(BackingStore) {
     tracker.trackFieldWithSize("buffer", size());
   }
 
-private:
+ private:
   std::shared_ptr<v8::BackingStore> backingStore;
   size_t byteLength;
   size_t byteOffset;
@@ -284,7 +292,7 @@ private:
 //     }
 //   };
 class BufferSource {
-public:
+ public:
   static kj::Maybe<BufferSource> tryAlloc(Lock& js, size_t size);
   static BufferSource wrap(
       Lock& js, void* data, size_t size, BackingStore::Disposer disposer, void* ctx);
@@ -382,8 +390,22 @@ public:
     handle = js.v8Ref(backing.createHandle(js));
   }
 
-  BufferSource clone(jsg::Lock& js) {
+  inline BufferSource clone(jsg::Lock& js) {
     return BufferSource(js, KJ_ASSERT_NONNULL(maybeBackingStore).clone());
+  }
+
+  template <class T = v8::Uint8Array>
+  inline BufferSource copy(jsg::Lock& js) {
+    KJ_IF_SOME(backing, maybeBackingStore) {
+      return BufferSource(js, backing.copy<T>(js));
+    }
+    return BufferSource(js, BackingStore::alloc<T>(js, 0));
+  }
+
+  inline void setToZero() {
+    KJ_IF_SOME(backing, maybeBackingStore) {
+      backing.asArrayPtr().fill(0);
+    }
   }
 
   template <BufferSourceType T = v8::Uint8Array>
@@ -403,7 +425,7 @@ public:
     }
   }
 
-private:
+ private:
   Value handle;
   kj::Maybe<BackingStore> maybeBackingStore;
 
@@ -426,7 +448,7 @@ private:
 // TypeWrapper implementation for the BufferSource type.
 template <typename TypeWrapper>
 class BufferSourceWrapper {
-public:
+ public:
   static constexpr const char* getName(BufferSource*) {
     return "BufferSource";
   }

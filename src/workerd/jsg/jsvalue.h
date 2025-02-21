@@ -127,7 +127,7 @@ enum PromiseState { PENDING, FULFILLED, REJECTED };
 //   const TypeHandler<MyStruct>& handler = // ...
 //   MyStruct v = KJ_ASSERT_NONNULL(handler.tryUnwrap(js, obj));
 class JsValue final {
-public:
+ public:
   template <typename T>
   kj::Maybe<T> tryCast() const KJ_WARN_UNUSED_RESULT;
 
@@ -161,7 +161,7 @@ public:
 
   explicit JsValue(v8::Local<v8::Value> inner);
 
-private:
+ private:
   v8::Local<v8::Value> inner;
   friend class Lock;
   template <typename TypeWrapper>
@@ -178,7 +178,7 @@ private:
 
 template <typename T, typename Self>
 class JsBase {
-public:
+ public:
   operator v8::Local<v8::Value>() const {
     return inner;
   }
@@ -199,7 +199,7 @@ public:
   }
   JsRef<Self> addRef(Lock& js) KJ_WARN_UNUSED_RESULT;
 
-private:
+ private:
   v8::Local<T> inner;
   friend class Lock;
   friend class JsValue;
@@ -213,14 +213,14 @@ private:
 };
 
 class JsBoolean final: public JsBase<v8::Boolean, JsBoolean> {
-public:
+ public:
   bool value(Lock& js) const KJ_WARN_UNUSED_RESULT;
 
   using JsBase<v8::Boolean, JsBoolean>::JsBase;
 };
 
 class JsArray final: public JsBase<v8::Array, JsArray> {
-public:
+ public:
   operator JsObject() const;
   uint32_t size() const KJ_WARN_UNUSED_RESULT;
   JsValue get(Lock& js, uint32_t i) const KJ_WARN_UNUSED_RESULT;
@@ -230,9 +230,9 @@ public:
 };
 
 class JsString final: public JsBase<v8::String, JsString> {
-public:
+ public:
   int length(Lock& js) const KJ_WARN_UNUSED_RESULT;
-  int utf8Length(Lock& js) const KJ_WARN_UNUSED_RESULT;
+  size_t utf8Length(Lock& js) const KJ_WARN_UNUSED_RESULT;
   kj::String toString(Lock& js) const KJ_WARN_UNUSED_RESULT;
   int hashCode() const;
 
@@ -250,7 +250,6 @@ public:
 
   enum WriteOptions {
     NONE = v8::String::NO_OPTIONS,
-    MANY_WRITES_EXPECTED = v8::String::HINT_MANY_WRITES_EXPECTED,
     NO_NULL_TERMINATION = v8::String::NO_NULL_TERMINATION,
     PRESERVE_ONE_BYTE_NULL = v8::String::PRESERVE_ONE_BYTE_NULL,
     REPLACE_INVALID_UTF8 = v8::String::REPLACE_INVALID_UTF8,
@@ -277,14 +276,14 @@ public:
 };
 
 class JsRegExp final: public JsBase<v8::RegExp, JsRegExp> {
-public:
+ public:
   kj::Maybe<JsArray> operator()(Lock& js, const JsString& input) const KJ_WARN_UNUSED_RESULT;
   kj::Maybe<JsArray> operator()(Lock& js, kj::StringPtr input) const KJ_WARN_UNUSED_RESULT;
   using JsBase<v8::RegExp, JsRegExp>::JsBase;
 };
 
 class JsDate final: public JsBase<v8::Date, JsDate> {
-public:
+ public:
   jsg::ByteString toUTCString(Lock& js) const;
   operator kj::Date() const;
   using JsBase<v8::Date, JsDate>::JsBase;
@@ -302,14 +301,14 @@ public:
 // You'll usually want to use `jsg::Promise<T>`. `jsg::JsPromise` should only be used when you need
 // direct access to the promise state (e.g. the promise state or its fulfilled value).
 class JsPromise final: public JsBase<v8::Promise, JsPromise> {
-public:
+ public:
   PromiseState state();
   JsValue result();
   using JsBase<v8::Promise, JsPromise>::JsBase;
 };
 
 class JsProxy final: public JsBase<v8::Proxy, JsProxy> {
-public:
+ public:
   JsValue target();
   JsValue handler();
   using JsBase<v8::Proxy, JsProxy>::JsBase;
@@ -317,7 +316,7 @@ public:
 
 #define V(Name)                                                                                    \
   class Js##Name final: public JsBase<v8::Name, Js##Name> {                                        \
-  public:                                                                                          \
+   public:                                                                                         \
     using JsBase<v8::Name, Js##Name>::JsBase;                                                      \
   };
 
@@ -331,7 +330,7 @@ V(Set)
 #undef V
 
 class JsObject final: public JsBase<v8::Object, JsObject> {
-public:
+ public:
   template <typename T>
   bool isInstanceOf(Lock& js) {
     return js.getInstance(inner, typeid(T)) != kj::none;
@@ -390,8 +389,14 @@ public:
   JsObject jsonClone(Lock&);
 };
 
+// Defined here because `JsObject` is an incomplete type in `jsg.h`.
+template <typename T>
+inline JsObject Lock::getPrototypeFor() {
+  return JsObject(getPrototypeFor(typeid(T)));
+}
+
 class JsMap final: public JsBase<v8::Map, JsMap> {
-public:
+ public:
   operator JsObject();
 
   void set(Lock& js, const JsValue& name, const JsValue& value);
@@ -434,13 +439,13 @@ inline kj::Maybe<T&> JsValue::tryGetExternal(Lock& js, const JsValue& value) {
 template <typename T>
 inline kj::Array<T> JsString::toArray(Lock& js, WriteOptions options) const {
   if constexpr (kj::isSameType<T, kj::byte>()) {
-    KJ_ASSERT(inner->ContainsOnlyOneByte());
+    KJ_DASSERT(inner->ContainsOnlyOneByte());
     auto buf = kj::heapArray<kj::byte>(inner->Length());
-    inner->WriteOneByte(js.v8Isolate, buf.begin(), 0, buf.size(), options);
+    inner->WriteOneByteV2(js.v8Isolate, 0, buf.size(), buf.begin(), options);
     return kj::mv(buf);
   } else {
     auto buf = kj::heapArray<uint16_t>(inner->Length());
-    inner->Write(js.v8Isolate, buf.begin(), 0, buf.size(), options);
+    inner->WriteV2(js.v8Isolate, 0, buf.size(), buf.begin(), options);
     return kj::mv(buf);
   }
 }
@@ -468,7 +473,7 @@ inline JsObject Lock::opaque(T&& inner) {
   return JsObject(wrapped.template As<v8::Object>());
 }
 
-// A persistent handle for a Js* type suitable for storage and gc visitable.
+// A persistent handle for a Js* type suitable for storage and GC visitable.
 //
 // For example,
 //
@@ -492,7 +497,7 @@ template <typename T>
 class JsRef final {
   static_assert(std::is_assignable_v<JsValue, T>, "JsRef<T>, T must be assignable to type JsValue");
 
-public:
+ public:
   JsRef(): JsRef(nullptr) {}
   JsRef(decltype(nullptr)): value(nullptr) {}
   JsRef(Lock& js, const T& value): value(js.v8Isolate, value.inner) {}
@@ -539,7 +544,7 @@ public:
     tracker.trackField("value", value);
   }
 
-private:
+ private:
   Value value;
   friend class JsValue;
 #define V(Name) friend class Js##Name;
@@ -621,7 +626,7 @@ struct JsValueWrapper {
 };
 
 class JsMessage final {
-public:
+ public:
   static JsMessage create(Lock& js, const JsValue& exception);
   explicit inline JsMessage(): inner(v8::Local<v8::Message>()) {
     requireOnStack(this);
@@ -643,7 +648,7 @@ public:
   // kj::Vector.
   void addJsStackTrace(Lock& js, kj::Vector<kj::String>& lines);
 
-private:
+ private:
   v8::Local<v8::Message> inner;
 };
 

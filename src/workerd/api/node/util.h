@@ -26,14 +26,14 @@ static constexpr bool IsWithinBounds(size_t off, size_t len, size_t max) noexcep
 class MIMEType;
 
 class MIMEParams final: public jsg::Object {
-private:
+ private:
   template <typename T>
   struct IteratorState final {
     kj::Array<T> values;
     uint index = 0;
   };
 
-public:
+ public:
   MIMEParams(kj::Maybe<MimeType&> mimeType = kj::none);
 
   static jsg::Ref<MIMEParams> constructor();
@@ -66,7 +66,7 @@ public:
     JSG_ITERABLE(entries);
   }
 
-private:
+ private:
   template <typename T>
   static kj::Maybe<T> iteratorNext(jsg::Lock& js, IteratorState<T>& state) {
     if (state.index >= state.values.size()) {
@@ -87,7 +87,7 @@ private:
 };
 
 class MIMEType final: public jsg::Object {
-public:
+ public:
   explicit MIMEType(MimeType inner);
   ~MIMEType() noexcept(false);
   static jsg::Ref<MIMEType> constructor(kj::String input);
@@ -109,7 +109,7 @@ public:
     JSG_METHOD_NAMED(toJSON, toString);
   }
 
-private:
+ private:
   workerd::MimeType inner;
   jsg::Ref<MIMEParams> params;
 };
@@ -155,7 +155,7 @@ private:
   V(WeakSet)
 
 class UtilModule final: public jsg::Object {
-public:
+ public:
   UtilModule() = default;
   UtilModule(jsg::Lock&, const jsg::Url&) {}
 
@@ -212,11 +212,16 @@ public:
     kj::String functionName;
     kj::String scriptName;
     int lineNumber;
+    // Node.js originally introduced the API with the name `getCallSite()` as an experimental
+    // API but then renamed it to `getCallSites()` soon after. We had already implemented the
+    // API with the original name in a release. To avoid the possibility of breaking, we export
+    // the function using both names.
+    int columnNumber;
     int column;
 
-    JSG_STRUCT(functionName, scriptName, lineNumber, column);
+    JSG_STRUCT(functionName, scriptName, lineNumber, columnNumber, column);
   };
-  kj::Array<CallSiteEntry> getCallSite(jsg::Lock& js, int frames);
+  kj::Array<CallSiteEntry> getCallSites(jsg::Lock& js, jsg::Optional<int> frames);
 
 #define V(Type) bool is##Type(jsg::JsValue value);
   JS_UTIL_IS_TYPES(V)
@@ -257,7 +262,7 @@ public:
     JSG_METHOD(getProxyDetails);
     JSG_METHOD(previewEntries);
     JSG_METHOD(getConstructorName);
-    JSG_METHOD(getCallSite);
+    JSG_METHOD(getCallSites);
 
 #define V(Type) JSG_METHOD(is##Type);
     JS_UTIL_IS_TYPES(V)

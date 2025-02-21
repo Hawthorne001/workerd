@@ -62,7 +62,7 @@ struct ActorSqliteTest final {
   kj::Vector<Call> calls;
 
   struct ActorSqliteTestHooks final: public ActorSqlite::Hooks {
-  public:
+   public:
     explicit ActorSqliteTestHooks(ActorSqliteTest& parent): parent(parent) {}
 
     kj::Promise<void> scheduleRun(kj::Maybe<kj::Date> newAlarmTime) override {
@@ -252,7 +252,7 @@ KJ_TEST("alarm scheduling starts synchronously before explicit local db commit")
         "no such savepoint: _cf_savepoint_0", test.db.run("RELEASE _cf_savepoint_0"));
 
     // We don't actually care what happens in the test after this point, but it's slightly simpler
-    // to readd the savepoint to allow the test to complete cleanly:
+    // to re-add the savepoint to allow the test to complete cleanly:
     test.db.run("SAVEPOINT _cf_savepoint_0");
 
     return kj::READY_NOW;
@@ -397,8 +397,15 @@ KJ_TEST("tells alarm handler to cancel when committed alarm is empty") {
 
   {
     auto armResult = test.actor.armAlarmHandler(oneMs, false);
+    // We expect armAlarmHandler() to tell us to cancel the alarm.
     KJ_ASSERT(armResult.is<ActorCache::CancelAlarmHandler>());
     auto waitPromise = kj::mv(armResult.get<ActorCache::CancelAlarmHandler>().waitBeforeCancel);
+
+    // We also expect the alarm cancellation to contain a scheduling request to delete the alarm,
+    // to handle cases where alarm deletion was durably committed to the database, but a failure
+    // occurred before the alarm deletion was conveyed to the alarm scheduler.
+    KJ_ASSERT(!waitPromise.poll(test.ws));
+    test.pollAndExpectCalls({"scheduleRun(none)"})[0]->fulfill();
     KJ_ASSERT(waitPromise.poll(test.ws));
     waitPromise.wait(test.ws);
   }

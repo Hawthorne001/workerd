@@ -2,10 +2,6 @@
 // python-entrypoint.js USER module.
 
 import { loadPyodide } from 'pyodide-internal:python';
-import {
-  uploadArtifacts,
-  maybeStoreMemorySnapshot,
-} from 'pyodide-internal:snapshot';
 import { enterJaegerSpan } from 'pyodide-internal:jaeger';
 import {
   TRANSITIVE_REQUIREMENTS,
@@ -21,7 +17,6 @@ import {
 import { reportError } from 'pyodide-internal:util';
 import { default as Limiter } from 'pyodide-internal:limiter';
 import { entropyBeforeRequest } from 'pyodide-internal:topLevelEntropy/lib';
-import { loadPackages } from 'pyodide-internal:loadPackage';
 
 function pyimportMainModule(pyodide: Pyodide): PyModule {
   if (!MAIN_MODULE_NAME.endsWith('.py')) {
@@ -74,21 +69,10 @@ async function applyPatch(pyodide: Pyodide, patchName: string): Promise<void> {
   pyodide.pyimport(patchName + '_patch');
 }
 
-/**
- * Set up Python packages:
- *  - patch loadPackage to ignore integrity
- *  - get requirements
- *  - Use tar file + requirements to mount site packages directory
- *  - if in workerd use loadPackage to load packages
- *  - install patches to make various requests packages work
- *
- * TODO: move this into setupPackages.js. Can't now because the patch imports
- * fail from there for some reason.
- */
-export async function setupPackages(pyodide: Pyodide): Promise<void> {
-  return await enterJaegerSpan('setup_packages', async () => {
+async function setupPatches(pyodide: Pyodide): Promise<void> {
+  return await enterJaegerSpan('setup_patches', async () => {
     patchLoadPackage(pyodide);
-    await loadPackages(pyodide._module, TRANSITIVE_REQUIREMENTS);
+
     // install any extra packages into the site-packages directory, so calculate where that is.
     const pymajor = pyodide._module._py_version_major();
     const pyminor = pyodide._module._py_version_minor();
@@ -119,7 +103,7 @@ function getMainModule(): Promise<PyModule> {
     }
     mainModulePromise = (async function () {
       const pyodide = await getPyodide();
-      await setupPackages(pyodide);
+      await setupPatches(pyodide);
       Limiter.beginStartup();
       try {
         return enterJaegerSpan('pyimport_main_module', () =>
@@ -147,9 +131,14 @@ function makeHandler(pyHandlerName: string): Handler {
         'prep_python',
         async () => await preparePython()
       );
-
+      const handler = mainModule[pyHandlerName];
+      if (!handler) {
+        throw new Error(
+          `Python entrypoint "${MAIN_MODULE_NAME}" does not export a handler named "${pyHandlerName}"`
+        );
+      }
       const result = await enterJaegerSpan('python_code', () => {
-        return mainModule[pyHandlerName].callRelaxed(...args);
+        return handler.callRelaxed(...args);
       });
 
       // Support returning a pyodide.ffi.FetchResponse.
@@ -161,8 +150,6 @@ function makeHandler(pyHandlerName: string): Handler {
     } catch (e) {
       console.warn('Error in makeHandler');
       reportError(e);
-    } finally {
-      args[2].waitUntil(uploadArtifacts());
     }
   };
 }
@@ -173,17 +160,6 @@ const handlers: {
 try {
   // Do not setup anything to do with Python in the global scope when tracing. The Jaeger tracing
   // needs to be called inside an IO context.
-  if (!IS_TRACING) {
-    if (IS_WORKERD) {
-      // If we're in workerd, we have to do setupPackages in the IoContext, so don't start it yet.
-      // TODO: fix this.
-      await getPyodide();
-    } else {
-      // If we're not in workerd, setupPackages doesn't require IO so we can do it all here.
-      await getMainModule();
-    }
-  }
-
   if (IS_WORKERD || IS_TRACING) {
     handlers.fetch = makeHandler('on_fetch');
     handlers.test = makeHandler('test');
@@ -203,13 +179,6 @@ try {
       }
     }
   }
-  /**
-   * Store the memory snapshot in the ArtifactBundler so that the validator can
-   * read it out. Needs to happen at the top level because the validator does
-   * not perform requests. In workerd, this will save a snapshot to disk if the
-   * `--python-save-snapshot` or `--python-save-baseline-snapshot` is passed.
-   */
-  maybeStoreMemorySnapshot();
 } catch (e) {
   console.warn('Error in top level in python-entrypoint-helper.js');
   reportError(e);

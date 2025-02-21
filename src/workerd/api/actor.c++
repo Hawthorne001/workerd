@@ -16,7 +16,7 @@
 namespace workerd::api {
 
 class LocalActorOutgoingFactory final: public Fetcher::OutgoingFactory {
-public:
+ public:
   LocalActorOutgoingFactory(uint channelId, kj::String actorId)
       : channelId(channelId),
         actorId(kj::mv(actorId)) {}
@@ -40,17 +40,17 @@ public:
     },
         {.inHouse = true,
           .wrapMetrics = true,
-          .operationName = kj::ConstString("actor_subrequest"_kjc)}));
+          .operationName = kj::ConstString("durable_object_subrequest"_kjc)}));
   }
 
-private:
+ private:
   uint channelId;
   kj::String actorId;
   kj::Maybe<kj::Own<IoChannelFactory::ActorChannel>> actorChannel;
 };
 
 class GlobalActorOutgoingFactory final: public Fetcher::OutgoingFactory {
-public:
+ public:
   GlobalActorOutgoingFactory(uint channelId,
       jsg::Ref<DurableObjectId> id,
       kj::Maybe<kj::String> locationHint,
@@ -82,10 +82,10 @@ public:
     },
         {.inHouse = true,
           .wrapMetrics = true,
-          .operationName = kj::ConstString("actor_subrequest"_kjc)}));
+          .operationName = kj::ConstString("durable_object_subrequest"_kjc)}));
   }
 
-private:
+ private:
   uint channelId;
   jsg::Ref<DurableObjectId> id;
   kj::Maybe<kj::String> locationHint;
@@ -93,6 +93,25 @@ private:
   bool enableReplicaRouting;
   kj::Maybe<kj::Own<IoChannelFactory::ActorChannel>> actorChannel;
 };
+
+kj::Own<WorkerInterface> ReplicaActorOutgoingFactory::newSingleUseClient(
+    kj::Maybe<kj::String> cfStr) {
+  auto& context = IoContext::current();
+
+  return context.getMetrics().wrapActorSubrequestClient(context.getSubrequest(
+      [&](TraceContext& tracing, IoChannelFactory& ioChannelFactory) {
+    if (tracing.span.isObserved()) {
+      tracing.span.setTag("actor_id"_kjc, kj::heapString(actorId));
+    }
+
+    // Unlike in `GlobalActorOutgoingFactory`, we do not create this lazily, since our channel was
+    // already open prior to this DO starting up.
+    return actorChannel->startRequest({.cfBlobJson = kj::mv(cfStr), .tracing = tracing});
+  },
+      {.inHouse = true,
+        .wrapMetrics = true,
+        .operationName = kj::ConstString("durable_object_subrequest"_kjc)}));
+}
 
 jsg::Ref<Fetcher> ColoLocalActorNamespace::get(kj::String actorId) {
   JSG_REQUIRE(actorId.size() > 0 && actorId.size() <= 2048, TypeError,

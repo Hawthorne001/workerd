@@ -128,7 +128,7 @@ ActorSqlite::ExplicitTxn::~ExplicitTxn() noexcept(false) {
     }
   }();
 
-  if (!committed) {
+  if (!committed && actorSqlite.broken == kj::none) {
     // Assume rollback if not committed.
     rollbackImpl();
   }
@@ -597,7 +597,7 @@ void ActorSqlite::shutdown(kj::Maybe<const kj::Exception&> maybeException) {
     // is ongoing after the actor cache is shutting down, the output gate is only broken if they
     // had to send a flush after shutdown, either from a scheduled flush or a retry after failure.
   } else {
-    // We've already experienced a terminal exception either from shutdown or oom, there should
+    // We've already experienced a terminal exception either from shutdown or OOM, there should
     // already be a flush scheduled that will break the output gate.
   }
 }
@@ -625,12 +625,7 @@ kj::OneOf<ActorSqlite::CancelAlarmHandler, ActorSqlite::RunAlarmHandler> ActorSq
         //
         // TODO(perf): If we already have such a rescheduling request in-flight, might want to
         // coalesce with the existing request?
-        if (localAlarmState == kj::none) {
-          // If clean scheduled time is unset, don't need to reschedule; just cancel the alarm.
-          return CancelAlarmHandler{.waitBeforeCancel = kj::READY_NOW};
-        } else {
-          return CancelAlarmHandler{.waitBeforeCancel = requestScheduledAlarm(localAlarmState)};
-        }
+        return CancelAlarmHandler{.waitBeforeCancel = requestScheduledAlarm(localAlarmState)};
       } else {
         return CancelAlarmHandler{.waitBeforeCancel = kj::READY_NOW};
       }
@@ -665,6 +660,50 @@ kj::Maybe<kj::Promise<void>> ActorSqlite::onNoPendingFlush() {
   //   gate is not blocked by `allowUnconfirmed` writes. At present we haven't actually
   //   implemented `allowUnconfirmed` yet.
   return outputGate.wait();
+}
+
+kj::Promise<kj::String> ActorSqlite::getCurrentBookmark() {
+  // This is an ersatz implementation that's good enough for local dev with D1's Session API.
+  //
+  // The returned bookmark satisfies the properties that D1 cares about:
+  //
+  // * Later bookmarks sort after earlier bookmarks.  We implement this by incrementing the bookmark
+  // * whenever getCurrentBookmark() is called.
+  //
+  // * Bookmarks from the current workerd session sort after bookmarks from previous sessions.  We
+  //   implement this by saving an ersatz bookmark in the SqliteMetadata table.
+
+  requireNotBroken();
+  uint64_t bookmark = 0;
+  KJ_IF_SOME(b, metadata.getLocalDevelopmentBookmark()) {
+    bookmark = b + 1;
+  }
+  metadata.setLocalDevelopmentBookmark(bookmark);
+
+  // TODO(cleanup): Left-padded number stringification should maybe be in KJ?
+  auto paddedHex = [](uint32_t n) {
+    kj::FixedArray<char, 8> result;
+    for (auto i = 0; i < result.size(); i++) {
+      char digit = n % 16;
+      n /= 16;
+      digit += digit < 10 ? '0' : ('a' - 10);
+      result[result.size() - 1 - i] = digit;
+    }
+    return result;
+  };
+
+  // Turn the bookmark into a format matching what Cloudflare's production returns.
+  constexpr uint32_t uint32_max = kj::maxValue;
+  kj::FixedArray<char, 32> pad;
+  pad.fill('0');
+  return kj::str(paddedHex(bookmark / uint32_max), '-', paddedHex(bookmark % uint32_max), '-',
+      paddedHex(0), '-', pad);
+}
+
+kj::Promise<void> ActorSqlite::waitForBookmark(kj::StringPtr bookmark) {
+  // This is an ersatz implementation that's good enough for local dev with D1's Session API.
+  requireNotBroken();
+  return kj::READY_NOW;
 }
 
 void ActorSqlite::TxnCommitRegulator::onError(

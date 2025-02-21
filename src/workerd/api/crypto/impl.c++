@@ -78,7 +78,7 @@ void throwOpensslError(const char* file, int line, kj::StringPtr code) {
   // Unfortunately BoringSSL's ERR_error_string() and friends produce unfriendly strings that
   // mostly just tell you the error constant name, which isn't what we want to throw at users.
   switch (ERR_GET_LIB(ERR_peek_last_error())) {
-    // The error code defines overlap between the different boringssl libraries (for example, we
+    // The error code defines overlap between the different BoringSSL libraries (for example, we
     // have EC_R_INVALID_ENCODING == RSA_R_CANNOT_RECOVER_MULTI_PRIME_KEY), so we must check the
     // library code.
     case ERR_LIB_EC:
@@ -218,6 +218,10 @@ bool CryptoKey::Impl::equals(const kj::Array<kj::byte>& other) const {
   KJ_FAIL_REQUIRE("Unable to compare raw key material for this key");
 }
 
+bool CryptoKey::Impl::equals(const jsg::BufferSource& other) const {
+  KJ_FAIL_REQUIRE("Unable to compare raw key material for this key");
+}
+
 kj::Own<CryptoKey::Impl> CryptoKey::Impl::from(kj::Own<EVP_PKEY> key) {
   switch (EVP_PKEY_id(key.get())) {
     case EVP_PKEY_RSA:
@@ -273,6 +277,12 @@ kj::Maybe<kj::Array<kj::byte>> bignumToArrayPadded(const BIGNUM& n, size_t padde
     return kj::none;
   }
   return kj::mv(result);
+}
+
+kj::Maybe<jsg::BufferSource> bignumToArray(jsg::Lock& js, const BIGNUM& n) {
+  auto backing = jsg::BackingStore::alloc<v8::ArrayBuffer>(js, BN_num_bytes(&n));
+  if (BN_bn2bin(&n, backing.asArrayPtr().begin()) != backing.size()) return kj::none;
+  return jsg::BufferSource(js, kj::mv(backing));
 }
 
 kj::Maybe<jsg::BufferSource> bignumToArrayPadded(jsg::Lock& js, const BIGNUM& n) {
@@ -340,5 +350,35 @@ kj::Maybe<kj::ArrayPtr<const kj::byte>> tryGetAsn1Sequence(kj::ArrayPtr<const kj
   auto start = 2;
   auto end = start + kj::min(data.size() - 2, data[1]);
   return data.slice(start, end);
+}
+
+kj::Maybe<kj::Array<kj::byte>> simdutfBase64UrlDecode(kj::StringPtr input) {
+  auto size = simdutf::maximal_binary_length_from_base64(input.begin(), input.size());
+  auto buf = kj::heapArray<kj::byte>(size);
+  auto result = simdutf::base64_to_binary(
+      input.begin(), input.size(), buf.asChars().begin(), simdutf::base64_url);
+  if (result.error != simdutf::SUCCESS) return kj::none;
+  KJ_ASSERT(result.count <= size);
+  return buf.slice(0, result.count).attach(kj::mv(buf));
+}
+
+kj::Maybe<jsg::BufferSource> simdutfBase64UrlDecode(jsg::Lock& js, kj::StringPtr input) {
+  auto size = simdutf::maximal_binary_length_from_base64(input.begin(), input.size());
+  ;
+  auto buf = kj::heapArray<kj::byte>(size);
+  auto result = simdutf::base64_to_binary(
+      input.begin(), input.size(), buf.asChars().begin(), simdutf::base64_url);
+  if (result.error != simdutf::SUCCESS) return kj::none;
+  KJ_ASSERT(result.count <= size);
+
+  auto backing = jsg::BackingStore::alloc<v8::ArrayBuffer>(js, result.count);
+  auto src = kj::arrayPtr(buf.begin(), result.count);
+  backing.asArrayPtr().copyFrom(src);
+  return jsg::BufferSource(js, kj::mv(backing));
+}
+
+jsg::BufferSource simdutfBase64UrlDecodeChecked(
+    jsg::Lock& js, kj::StringPtr input, kj::StringPtr error) {
+  return JSG_REQUIRE_NONNULL(simdutfBase64UrlDecode(js, input), Error, error);
 }
 }  // namespace workerd::api

@@ -3,8 +3,14 @@
 //     https://opensource.org/licenses/Apache-2.0
 #include "pyodide.h"
 
+#include "requirements.h"
+
+#include <workerd/api/pyodide/setup-emscripten.h>
+#include <workerd/io/compatibility-date.h>
 #include <workerd/util/string-buffer.h>
 #include <workerd/util/strings.h>
+
+#include <pyodide/generated/pyodide_extra.capnp.h>
 
 #include <kj/array.h>
 #include <kj/common.h>
@@ -35,10 +41,9 @@ void PyodideBundleManager::setPyodideBundleData(
       kj::mv(version), {.messageReader = kj::mv(messageReader), .bundle = bundle});
 }
 
-const kj::Maybe<kj::ArrayPtr<const unsigned char>> PyodidePackageManager::getPyodidePackage(
+const kj::Maybe<const kj::Array<unsigned char>&> PyodidePackageManager::getPyodidePackage(
     kj::StringPtr id) const {
-  return packages.lockShared()->find(id).map(
-      [](const kj::Array<unsigned char>& t) { return t.asPtr(); });
+  return packages.lockShared()->find(id);
 }
 
 void PyodidePackageManager::setPyodidePackageData(
@@ -60,27 +65,33 @@ static int readToTarget(
   return toCopy;
 }
 
-int PackagesTarReader::read(jsg::Lock& js, int offset, kj::Array<kj::byte> buf) {
+int ReadOnlyBuffer::read(jsg::Lock& js, int offset, kj::Array<kj::byte> buf) {
   return readToTarget(source, offset, buf);
 }
 
-kj::Array<jsg::JsRef<jsg::JsString>> PyodideMetadataReader::getNames(jsg::Lock& js) {
-  auto builder = kj::heapArrayBuilder<jsg::JsRef<jsg::JsString>>(this->names.size());
+kj::Array<jsg::JsRef<jsg::JsString>> PyodideMetadataReader::getNames(
+    jsg::Lock& js, jsg::Optional<kj::String> maybeExtFilter) {
+  auto builder = kj::Vector<jsg::JsRef<jsg::JsString>>(this->names.size());
   for (auto i: kj::zeroTo(builder.capacity())) {
+    KJ_IF_SOME(ext, maybeExtFilter) {
+      if (!this->names[i].endsWith(ext)) {
+        continue;
+      }
+    }
     builder.add(js, js.str(this->names[i]));
   }
-  return builder.finish();
+  return builder.releaseAsArray();
 }
 
 kj::Array<jsg::JsRef<jsg::JsString>> PyodideMetadataReader::getWorkerFiles(
     jsg::Lock& js, kj::String ext) {
-  auto builder = kj::heapArrayBuilder<jsg::JsRef<jsg::JsString>>(this->names.size());
-  for (auto i: kj::zeroTo(builder.capacity())) {
+  auto builder = kj::Vector<jsg::JsRef<jsg::JsString>>(this->names.size());
+  for (auto i: kj::zeroTo(this->names.size())) {
     if (this->names[i].endsWith(ext)) {
       builder.add(js, js.str(this->contents[i]));
     }
   }
-  return builder.finish();
+  return builder.releaseAsArray();
 }
 
 kj::Array<jsg::JsRef<jsg::JsString>> PyodideMetadataReader::getRequirements(jsg::Lock& js) {
@@ -112,6 +123,18 @@ int PyodideMetadataReader::readMemorySnapshot(int offset, kj::Array<kj::byte> bu
     return 0;
   }
   return readToTarget(KJ_REQUIRE_NONNULL(memorySnapshot), offset, buf);
+}
+
+kj::Array<kj::String> PyodideMetadataReader::getTransitiveRequirements() {
+  auto packages = parseLockFile(packagesLock);
+  auto depMap = getDepMapFromPackagesLock(*packages);
+
+  auto allRequirements = getPythonPackageNames(*packages, depMap, requirements, packagesVersion);
+  auto result = kj::heapArrayBuilder<kj::String>(allRequirements.size());
+  for (const auto& r: allRequirements) {
+    result.add(kj::str(r));
+  }
+  return result.finish();
 }
 
 int ArtifactBundler::readMemorySnapshot(int offset, kj::Array<kj::byte> buf) {
@@ -193,7 +216,7 @@ kj::Array<kj::String> ArtifactBundler::parsePythonScriptImports(kj::Array<kj::St
       // https://docs.python.org/3/reference/lexical_analysis.html#identifiers
       //
       // We also accept `.` because import idents can contain it.
-      // TODO: We don't currently support unicode, but if we see packages that utilise it we will
+      // TODO: We don't currently support unicode, but if we see packages that utilize it we will
       // implement that support.
       if (isDigit(str[start])) {
         return 0;
@@ -314,6 +337,32 @@ kj::Array<kj::String> ArtifactBundler::parsePythonScriptImports(kj::Array<kj::St
   return result.releaseAsArray();
 }
 
+const kj::Array<kj::StringPtr> snapshotImports = kj::arr("_pyodide"_kj,
+    "_pyodide.docstring"_kj,
+    "_pyodide._core_docs"_kj,
+    "traceback"_kj,
+    "collections.abc"_kj,
+    // Asyncio is the really slow one here. In native Python on my machine, `import asyncio` takes ~50
+    // ms.
+    "asyncio"_kj,
+    "inspect"_kj,
+    "tarfile"_kj,
+    "importlib",
+    "importlib.metadata"_kj,
+    "re"_kj,
+    "shutil"_kj,
+    "sysconfig"_kj,
+    "importlib.machinery"_kj,
+    "pathlib"_kj,
+    "site"_kj,
+    "tempfile"_kj,
+    "typing"_kj,
+    "zipfile"_kj);
+
+kj::Array<kj::StringPtr> ArtifactBundler::getSnapshotImports() {
+  return kj::heapArray(snapshotImports.begin(), snapshotImports.size());
+}
+
 // This is equivalent to `pkgImport.replace('.', '/') + ".py"`.
 kj::String importToModuleFilename(kj::StringPtr pkgImport) {
   auto result = kj::heapString(pkgImport.size() + 3);
@@ -331,60 +380,80 @@ kj::String importToModuleFilename(kj::StringPtr pkgImport) {
   return result;
 }
 
+bool isWorkerModuleImport(kj::HashSet<kj::String>& workerModules,
+    kj::ArrayPtr<const char> firstComponent,
+    kj::StringPtr pkgImport) {
+  // TODO: handling for:
+  // 1. namespace packages
+  // 2. shared libraries
+  return workerModules.contains(kj::str(firstComponent, ".py")) ||
+      workerModules.contains(kj::str(firstComponent, "/__init__.py")) ||
+      workerModules.contains(importToModuleFilename(pkgImport));
+}
+
 kj::Array<kj::String> ArtifactBundler::filterPythonScriptImports(
-    kj::HashSet<kj::String> locals, kj::Array<kj::String> imports) {
-  kj::HashSet<kj::StringPtr> snapshotImportsSet;
-  for (auto& pkgImport: ArtifactBundler::getSnapshotImports()) {
-    snapshotImportsSet.insert(kj::mv(pkgImport));
+    kj::HashSet<kj::String> workerModules, kj::ArrayPtr<kj::String> imports) {
+  auto baselineSnapshotImportsSet = kj::HashSet<kj::StringPtr>();
+  for (auto& pkgImport: snapshotImports) {
+    baselineSnapshotImportsSet.insert(kj::mv(pkgImport));
   }
 
-  kj::HashSet<kj::String> filteredImports;
+  kj::HashSet<kj::String> filteredImportsSet;
+  filteredImportsSet.reserve(imports.size());
   for (auto& pkgImport: imports) {
-    if (filteredImports.contains(pkgImport)) [[unlikely]] {
-      continue;  // Skip duplicates.
+    auto firstDot = pkgImport.findFirst('.').orDefault(pkgImport.size());
+    auto firstComponent = pkgImport.slice(0, firstDot);
+    // Skip duplicates
+    if (filteredImportsSet.contains(pkgImport)) [[unlikely]] {
+      continue;
     }
 
-    auto moduleFilename = importToModuleFilename(pkgImport);
-    if (!locals.contains(moduleFilename) && pkgImport != "js" &&
-        !snapshotImportsSet.contains(pkgImport)) {
-      filteredImports.insert(kj::mv(pkgImport));
+    // don't include js or pyodide.
+    if (firstComponent == "js"_kj.asArray() || firstComponent == "pyodide"_kj.asArray()) {
+      continue;
     }
+
+    // Don't include anything that went into the baseline snapshot
+    if (baselineSnapshotImportsSet.contains(pkgImport)) {
+      continue;
+    }
+
+    // Don't include imports from worker files
+    if (isWorkerModuleImport(workerModules, firstComponent, pkgImport)) {
+      continue;
+    }
+    filteredImportsSet.insert(kj::mv(pkgImport));
   }
 
-  kj::Vector<kj::String> filteredImportsVec;
-  for (auto& pkgImport: filteredImports) {
-    filteredImportsVec.add(kj::mv(pkgImport));
+  auto filteredImportsBuilder = kj::heapArrayBuilder<kj::String>(filteredImportsSet.size());
+  for (auto& pkgImport: filteredImportsSet) {
+    filteredImportsBuilder.add(kj::mv(pkgImport));
   }
-
-  return filteredImportsVec.releaseAsArray();
+  return filteredImportsBuilder.finish();
 }
 
 kj::Array<kj::String> ArtifactBundler::filterPythonScriptImportsJs(
-    kj::Array<kj::String> locals, kj::Array<kj::String> imports) {
-  kj::HashSet<kj::String> localsSet;
-  for (auto& local: locals) {
-    localsSet.insert(kj::mv(local));
+    kj::Array<kj::String> workerModules, kj::Array<kj::String> imports) {
+  kj::HashSet<kj::String> workerModulesSet;
+  for (auto& workerModule: workerModules) {
+    workerModulesSet.insert(kj::mv(workerModule));
   }
-  return ArtifactBundler::filterPythonScriptImports(kj::mv(localsSet), kj::mv(imports));
+  return ArtifactBundler::filterPythonScriptImports(kj::mv(workerModulesSet), kj::mv(imports));
 }
 
-kj::Array<kj::StringPtr> ArtifactBundler::getSnapshotImports() {
-  kj::StringPtr imports[] = {"_pyodide.docstring"_kj, "_pyodide._core_docs"_kj, "traceback"_kj,
-    "collections.abc"_kj,
-    // Asyncio is the really slow one here. In native Python on my machine, `import asyncio` takes ~50
-    // ms.
-    "asyncio"_kj, "inspect"_kj, "tarfile"_kj, "importlib.metadata"_kj, "re"_kj, "shutil"_kj,
-    "sysconfig"_kj, "importlib.machinery"_kj, "pathlib"_kj, "site"_kj, "tempfile"_kj, "typing"_kj,
-    "zipfile"_kj};
-  kj::Vector<kj::StringPtr> result;
-  for (auto pkgImport: imports) {
-    result.add(pkgImport);
+kj::Maybe<kj::String> getPyodideLock(PythonSnapshotRelease::Reader pythonSnapshotRelease) {
+  for (auto pkgLock: *PACKAGE_LOCKS) {
+    if (pkgLock.getPackageDate() == pythonSnapshotRelease.getPackages()) {
+      return kj::str(pkgLock.getLock());
+    }
   }
-  return result.releaseAsArray();
+
+  return kj::none;
 }
 
-jsg::Ref<PyodideMetadataReader> makePyodideMetadataReader(
-    Worker::Reader conf, const PythonConfig& pythonConfig) {
+jsg::Ref<PyodideMetadataReader> makePyodideMetadataReader(Worker::Reader conf,
+    const PythonConfig& pythonConfig,
+    PythonSnapshotRelease::Reader pythonRelease) {
   auto modules = conf.getModules();
   auto mainModule = kj::str(modules.begin()->getName());
   int numFiles = 0;
@@ -431,23 +500,38 @@ jsg::Ref<PyodideMetadataReader> makePyodideMetadataReader(
     }
     names.add(kj::str(module.getName()));
   }
-  bool createSnapshot = pythonConfig.createSnapshot;
-  bool createBaselineSnapshot = pythonConfig.createBaselineSnapshot;
-  bool snapshotToDisk = createSnapshot || createBaselineSnapshot;
+  bool snapshotToDisk = pythonConfig.createSnapshot || pythonConfig.createBaselineSnapshot;
+  if (pythonConfig.loadSnapshotFromDisk && snapshotToDisk) {
+    KJ_FAIL_ASSERT(
+        "Doesn't make sense to pass both --python-save-snapshot and --python-load-snapshot");
+  }
+  kj::Maybe<kj::Array<kj::byte>> memorySnapshot = kj::none;
+  if (pythonConfig.loadSnapshotFromDisk) {
+    auto& root = KJ_REQUIRE_NONNULL(pythonConfig.packageDiskCacheRoot);
+    kj::Path path("snapshot.bin");
+    auto maybeFile = root->tryOpenFile(path);
+    if (maybeFile == kj::none) {
+      KJ_FAIL_REQUIRE("Expected to find snapshot.bin in the package cache directory");
+    }
+    memorySnapshot = KJ_REQUIRE_NONNULL(maybeFile)->readAllBytes();
+  }
+  auto lock = KJ_ASSERT_NONNULL(getPyodideLock(pythonRelease),
+      kj::str("No lock file defined for Python packages release ", pythonRelease.getPackages()));
+
   // clang-format off
   return jsg::alloc<PyodideMetadataReader>(
     kj::mv(mainModule),
     names.finish(),
     contents.finish(),
     requirements.finish(),
-    kj::str("20240829.4"), // TODO: hardcoded version & lock
-    kj::str(PYODIDE_LOCK.toString()),
+    kj::str(pythonRelease.getPackages()),
+    kj::mv(lock),
     true      /* isWorkerd */,
     false     /* isTracing */,
     snapshotToDisk,
-    createBaselineSnapshot,
+    pythonConfig.createBaselineSnapshot,
     false,    /* usePackagesInArtifactBundler */
-    kj::none  /* memorySnapshot */
+    kj::mv(memorySnapshot)
   );
   // clang-format on
 }
@@ -482,6 +566,16 @@ void DiskCache::put(jsg::Lock& js, kj::String key, kj::Array<kj::byte> data) {
   } else {
     return;
   }
+}
+
+jsg::JsValue SetupEmscripten::getModule(jsg::Lock& js) {
+  js.installJspi();
+  js.v8Context()->SetSecurityToken(emscriptenRuntime.contextToken.getHandle(js));
+  return emscriptenRuntime.emscriptenRuntime.getHandle(js);
+}
+
+void SetupEmscripten::visitForGc(jsg::GcVisitor& visitor) {
+  visitor.visit(const_cast<EmscriptenRuntime&>(emscriptenRuntime).emscriptenRuntime);
 }
 
 bool hasPythonModules(capnp::List<server::config::Worker::Module>::Reader modules) {

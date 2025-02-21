@@ -17,8 +17,8 @@ static constexpr size_t DEFAULT_MAX_PBKDF2_ITERATIONS = 100'000;
 // Interface for an object that enforces resource limits on an Isolate level.
 //
 // See also LimitEnforcer, which enforces on a per-request level.
-class IsolateLimitEnforcer {
-public:
+class IsolateLimitEnforcer: public kj::Refcounted {
+ public:
   // Get CreateParams to pass when constructing a new isolate.
   virtual v8::Isolate::CreateParams getCreateParams() = 0;
 
@@ -64,7 +64,7 @@ public:
   // Report resource usage metrics to the given isolate metrics object.
   virtual void reportMetrics(IsolateObserver& isolateMetrics) const = 0;
 
-  // Called when performing a cypto key derivation function (like pbkdf2) to determine if
+  // Called when performing a crypto key derivation function (like pbkdf2) to determine if
   // if the requested number of iterations is acceptable. If kj::none is returned, the
   // number of iterations requested is acceptable. If a number is returned, the requested
   // iterations is unacceptable and the return value specifies the maximum.
@@ -83,11 +83,13 @@ public:
   virtual size_t getBlobSizeLimit() const {
     return 128 * 1024 * 1024;  // 128 MB
   }
+
+  virtual bool hasExcessivelyExceededHeapLimit() const = 0;
 };
 
 // Abstract interface that enforces resource limits on a IoContext.
 class LimitEnforcer {
-public:
+ public:
   // Called just after taking the isolate lock, before executing JavaScript code, to enforce
   // limits on that code execution, particularly the CPU limit. The returned `Own<void>` should
   // be dropped when JavaScript is done, before unlocking the isolate.
@@ -109,7 +111,7 @@ public:
   // external subrequests.
   virtual void newSubrequest(bool isInHouse) = 0;
 
-  enum class KvOpType { GET, PUT, LIST, DELETE };
+  enum class KvOpType { GET, GET_WITH, PUT, LIST, DELETE };
   // Called before starting a KV operation. Throws a JSG exception if the operation should be
   // blocked due to exceeding limits, such as the free tier daily operation limit.
   virtual void newKvRequest(KvOpType op) = 0;
